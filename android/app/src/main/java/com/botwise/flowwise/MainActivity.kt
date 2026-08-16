@@ -29,6 +29,7 @@ import com.botwise.flowwise.data.customers.CustomersState
 import com.botwise.flowwise.data.outbox.OutboxState
 import com.botwise.flowwise.data.outbox.OutboxWorker
 import com.botwise.flowwise.data.pos.PosState
+import com.botwise.flowwise.data.refunds.RefundState
 import com.botwise.flowwise.data.reports.ReportsState
 import com.botwise.flowwise.data.sync.CatalogueSyncWorker
 import com.botwise.flowwise.ui.branches.BranchSelectScreen
@@ -38,6 +39,7 @@ import com.botwise.flowwise.ui.inventory.InventoryScreen
 import com.botwise.flowwise.ui.login.LoginScreen
 import com.botwise.flowwise.ui.pos.PosScreen
 import com.botwise.flowwise.ui.pos.ReceiptScreen
+import com.botwise.flowwise.ui.refunds.RefundScreen
 import com.botwise.flowwise.ui.procurement.ProcurementScreen
 import com.botwise.flowwise.ui.queue.OutboxScreen
 import com.botwise.flowwise.ui.reports.ReportsScreen
@@ -114,7 +116,7 @@ private fun schedulePeriodicOutboxFlush(context: Context) {
     )
 }
 
-private enum class AppRoute { HOME, TILL_CART, TILL_SCAN, TILL_RECEIPT, INVENTORY, PROCUREMENT, CUSTOMERS, REPORTS, QUEUE }
+private enum class AppRoute { HOME, TILL_CART, TILL_SCAN, TILL_RECEIPT, REFUNDS, INVENTORY, PROCUREMENT, CUSTOMERS, REPORTS, QUEUE }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -138,6 +140,9 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
     val reportsState = remember {
         ReportsState(container.apiClient, container.authManager)
     }
+    val refundState = remember {
+        RefundState(container.apiClient, container.authManager, container.outboxDao)
+    }
     val outboxState = remember {
         OutboxState(container.apiClient, container.authManager, container.outboxDao)
     }
@@ -151,6 +156,7 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
         route == AppRoute.TILL_SCAN -> "Scan"
         route == AppRoute.TILL_RECEIPT -> "Receipt"
         route == AppRoute.TILL_CART -> "Till"
+        route == AppRoute.REFUNDS -> "Refunds"
         route == AppRoute.INVENTORY -> "Stock"
         route == AppRoute.PROCUREMENT -> "Procurement"
         route == AppRoute.CUSTOMERS -> "Customers"
@@ -192,6 +198,7 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
                 authManager = container.authManager,
                 pendingOps = pendingOps,
                 onTill = { route = AppRoute.TILL_CART },
+                onRefunds = { route = AppRoute.REFUNDS },
                 onStock = { route = AppRoute.INVENTORY },
                 onProcurement = { route = AppRoute.PROCUREMENT },
                 onCustomers = { route = AppRoute.CUSTOMERS },
@@ -219,6 +226,10 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
                     posState.dismissReceipt()
                     route = AppRoute.TILL_CART
                 },
+            )
+            route == AppRoute.REFUNDS -> RefundScreen(
+                modifier = Modifier.padding(padding),
+                state = refundState,
             )
             route == AppRoute.INVENTORY -> InventoryScreen(
                 modifier = Modifier.padding(padding),

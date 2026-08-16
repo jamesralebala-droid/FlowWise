@@ -59,6 +59,15 @@ export class SupplierPortalController {
   }
 
   @UseGuards(SupplierPortalGuard)
+  @Post("delivery-notes")
+  async submitDeliveryNote(
+    @Req() req: AuthedRequest,
+    @Body() body: { poId?: string; lines?: { variantId: string; quantity: string }[]; notes?: string },
+  ) {
+    return this.portal.submitDeliveryNote(req.claims.org, supplierId(req), body);
+  }
+
+  @UseGuards(SupplierPortalGuard)
   @Put("price-list/:variantId")
   async updatePrice(@Req() req: AuthedRequest, @Param("variantId") variantId: string, @Body() body: { unitCost?: string }) {
     return this.portal.updatePrice(supplierId(req), req.claims.org, variantId, body);

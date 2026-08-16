@@ -1,10 +1,11 @@
-# FlowWise — Operations Runbook (Phase 4: Hardening & Rollout, Phase 6–7 ops)
+# FlowWise — Operations Runbook (Phase 4: Hardening & Rollout, Phase 6–8 ops)
 
 This document is the operating manual for the FlowWise backend. It covers the
 Phase 4 checklist: **load testing, security hardening, restore/device testing,
-data import, training, and the one-branch pilot** — plus the Phase 6–7
-operations for mobile-money webhooks/payouts, FX rates, the supplier portal
-and the web dashboard. The five invariants from the README are the ground
+data import, training, and the one-branch pilot** — plus the Phase 6–8
+operations for mobile-money webhooks/payouts, FX rates, the supplier portal,
+the web dashboard, delivery notes, Android signing and single-origin hosting.
+The five invariants from the README are the ground
 rules for every procedure here — especially "never edit data to fix a
 problem".
 
@@ -255,6 +256,35 @@ count, then fix discrepancies with a *count*, not an edit.
   `<code>@flowwise.demo`). Suppliers can only see/edit their own data; the
   `price-list` PUT is audited and feeds GRN/PO cost hints.
 - **APK distribution.** Debug APK is a CI artifact on every run (14 days);
-  release (minified, unsigned) via `workflow_dispatch` or a `v*` tag (30
-  days). Wire a signing config + keystore secrets into
-  `android/app/build.gradle.kts` before public distribution.
+  release (minified) via `workflow_dispatch` or a `v*` tag (30 days).
+  Signing comes from CI secrets — see §12.
+
+## 12. Phase 8 operations (refunds, signing, delivery notes, hosting)
+
+- **Refunds on the till are outbox ops.** The Android refund screen writes a
+  `refund` op to the local outbox (sale id + amount + reason); it syncs
+  through the same replay-safe flush as sales. A refund of a mobile-money
+  sale also creates the wallet payout (§11) — the refund stands even if the
+  gateway call fails; settle it from the payout audit trail.
+- **Release signing (secrets, never files).** The release APK is signed only
+  when CI secrets are set: `ANDROID_KEYSTORE_B64` (base64 of the .jks),
+  `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
+  The workflow decodes the keystore to a temp file, the Gradle signing block
+  consumes it, and the temp file dies with the runner. Without secrets the
+  release build stays unsigned — fine for internal pilots, never publish to
+  an app store unsigned. For local signing, put the same values in
+  `android/keystore.properties` (gitignored). **Rotate the keystore
+  passwords if they ever appear in logs or a PR.**
+- **Supplier delivery notes are drafts until posted.** A submitted delivery
+  note creates a DRAFT GRN (no ledger effect); the branch posts it with the
+  normal GRN post endpoint. Posting one delivery-note GRN posts the whole
+  pending batch for that PO together, and the PO advances to `received`
+  only when the batch completes it. A delivery note can never exceed the
+  ordered quantity (posted + pending are counted), and the branch can still
+  adjust/reject by not posting — no data surgery needed.
+- **Single-origin hosting.** The API serves the built web dashboard from
+  `web/dist` (`WEB_DIST` overrides the auto-detected path) with an SPA
+  fallback; `/v1/*` is never intercepted. Deploy = build both (`bun run
+  build` at the root) → run migrations → start the API. The dashboard, POS
+  and supplier portal are then on the same origin as the API — no CORS,
+  no separate static host.

@@ -26,6 +26,8 @@ export interface Env {
   dodoWebhookSecret?: string;
   /** Supplier-portal access-token lifetime (Phase 7). */
   supplierTokenTtlSeconds: number;
+  /** Phase 8: absolute path to the built web dashboard (static files). */
+  webDist?: string;
 }
 
 export function loadEnv(): Env {
@@ -54,6 +56,7 @@ export function loadEnv(): Env {
     dodoApiKey: process.env.DODO_API_KEY || undefined,
     dodoWebhookSecret: process.env.DODO_WEBHOOK_SECRET || undefined,
     supplierTokenTtlSeconds: Number(process.env.SUPPLIER_TOKEN_TTL_SECONDS ?? 86400),
+    webDist: process.env.WEB_DIST || undefined,
   };
 }
 

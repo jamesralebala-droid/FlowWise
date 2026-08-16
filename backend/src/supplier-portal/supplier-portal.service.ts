@@ -13,6 +13,7 @@ import { env } from "../env.js";
 import { verifyPassword } from "../password.js";
 import { JwtService } from "../auth/jwt.service.js";
 import { AuditService } from "../auth/audit.service.js";
+import { GrnsService } from "../inventory/grns.service.js";
 
 const DECIMAL_RE = /^\d{1,12}(\.\d{1,4})?$/;
 
@@ -32,6 +33,7 @@ export class SupplierPortalService {
     @Inject(DB_TOKEN) private readonly db: Db,
     private readonly jwt: JwtService,
     private readonly audit: AuditService,
+    private readonly grns: GrnsService,
   ) {}
 
   /**
@@ -196,8 +198,8 @@ export class SupplierPortalService {
       const result = [];
       for (const po of pos.rows) {
         const lines = await tx.query(
-          `SELECT pl.line_no AS "lineNo", v.name AS "variantName", p.name AS "productName",
-                  pl.quantity, pl.unit_cost AS "unitCost",
+          `SELECT pl.line_no AS "lineNo", pl.variant_id AS "variantId", v.name AS "variantName",
+                  p.name AS "productName", pl.quantity, pl.unit_cost AS "unitCost",
                   pl.received_quantity AS "receivedQuantity",
                   (pl.quantity - pl.received_quantity) AS "outstandingQuantity"
            FROM purchase_order_lines pl
@@ -227,8 +229,8 @@ export class SupplierPortalService {
       );
       if (po.rows.length === 0) throw new NotFoundException("Purchase order not found for this supplier");
       const lines = await tx.query(
-        `SELECT pl.line_no AS "lineNo", v.name AS "variantName", p.name AS "productName",
-                pl.quantity, pl.unit_cost AS "unitCost",
+        `SELECT pl.line_no AS "lineNo", pl.variant_id AS "variantId", v.name AS "variantName",
+                p.name AS "productName", pl.quantity, pl.unit_cost AS "unitCost",
                 pl.received_quantity AS "receivedQuantity",
                 (pl.quantity - pl.received_quantity) AS "outstandingQuantity"
          FROM purchase_order_lines pl
@@ -260,6 +262,21 @@ export class SupplierPortalService {
         ),
     );
     return { items: res.rows };
+  }
+
+  /**
+   * Phase 8: submit a delivery note against one of the supplier's POs. The
+   * GRN lands as a DRAFT — the branch reviews and posts it (ledger + PO
+   * receipt update happen at posting, by the stock team).
+   */
+  async submitDeliveryNote(
+    orgId: string,
+    supplierId: string,
+    input: { poId?: string; lines?: { variantId: string; quantity: string }[]; notes?: string },
+  ): Promise<unknown> {
+    const poId = input.poId?.trim();
+    if (!poId) throw new BadRequestException("poId is required");
+    return this.grns.createSupplierDraft(orgId, supplierId, poId, input.lines ?? [], input.notes);
   }
 
   /** Supplier self-service price update — the cost hint used for margins/POs. */

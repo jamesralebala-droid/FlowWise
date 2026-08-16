@@ -8,7 +8,9 @@
   ],
   "scripts": {
     "dev": "cd backend && bun run dev",
-    "build": "cd backend && bun run build",
+    "build": "bun run build:backend && bun run build:web",
+    "build:backend": "cd backend && bun run build",
+    "build:web": "cd web && bun run build",
     "start": "cd backend && bun run start",
     "test": "cd backend && bun run test",
     "migrate": "cd backend && bun run migrate",

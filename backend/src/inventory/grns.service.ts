@@ -1,5 +1,5 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { randomBytes } from "node:crypto";
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { createHash, randomBytes } from "node:crypto";
 import { DB_TOKEN } from "../db/constants.js";
 import type { Db, DbExecutor } from "../db/db.js";
 import { AuditService } from "../auth/audit.service.js";
@@ -55,6 +55,123 @@ export class GrnsService {
         const existing = await tx.query("SELECT id FROM goods_receipts WHERE org_id = $1 AND client_operation_id = $2", [claims.org, opId]);
         if (existing.rows.length > 0) return this.load(tx, claims.org, existing.rows[0].id as string);
         return this.insertDraft(tx, claims, { ...input, clientOperationId: opId });
+      },
+    );
+  }
+
+  /**
+   * Phase 8: a supplier submits a delivery note against their PO → a DRAFT
+   * GRN tied to that PO (no ledger effect until the branch posts it with
+   * `stock.grn`). Quantities are capped at the outstanding PO line amounts;
+   * unit costs are snapshotted from the PO so the branch never receives at
+   * an unknown price. Supplier identity comes from the portal token, never
+   * from the payload.
+   */
+  async createSupplierDraft(
+    orgId: string,
+    supplierId: string,
+    poId: string,
+    lines: { variantId: string; quantity: string }[],
+    notes?: string,
+  ): Promise<unknown> {
+    if (!Array.isArray(lines) || lines.length === 0) {
+      throw new BadRequestException("a delivery note needs at least one line");
+    }
+    for (const [i, l] of lines.entries()) {
+      requireString(l.variantId, `lines[${i}].variantId`);
+      assertDecimal(l.quantity, `lines[${i}].quantity`, { allowZero: false });
+    }
+
+    return this.db.withContext(
+      { orgId, userId: null, deviceId: null },
+      async (tx) => {
+        const po = await tx.query(
+          "SELECT id, branch_id, supplier_id, status, document_no FROM purchase_orders WHERE id = $1 AND org_id = $2",
+          [poId, orgId],
+        );
+        if (po.rows.length === 0) throw new NotFoundException("Purchase order not found");
+        const poRow = po.rows[0] as { branch_id: string; supplier_id: string; status: string; document_no: string };
+        if (poRow.supplier_id !== supplierId) {
+          throw new ForbiddenException("This purchase order belongs to another supplier");
+        }
+        if (poRow.status !== "sent" && poRow.status !== "partially_received") {
+          throw new BadRequestException("Only a sent purchase order can be delivered against");
+        }
+
+        const poLines = await tx.query(
+          `SELECT variant_id AS "variantId", quantity, received_quantity AS "receivedQuantity", unit_cost AS "unitCost"
+           FROM purchase_order_lines WHERE purchase_order_id = $1 AND org_id = $2`,
+          [poId, orgId],
+        );
+        const byVariant = new Map<string, { quantity: string; received: string; cost: string }>();
+        for (const l of poLines.rows) {
+          byVariant.set(l.variantId as string, {
+            quantity: String(l.quantity),
+            received: String(l.receivedQuantity),
+            cost: String(l.unitCost),
+          });
+        }
+        // Pending (unposted) delivery notes for this PO also count against the
+        // ordered quantity — a supplier can never over-subscribe across drops.
+        const pending = await tx.query(
+          `SELECT gl.variant_id AS "variantId", SUM(gl.quantity)::numeric(14,4) AS "quantity"
+           FROM goods_receipt_lines gl
+           JOIN goods_receipts g ON g.id = gl.goods_receipt_id
+           WHERE g.po_id = $1 AND g.org_id = $2 AND g.status = 'draft'
+             AND g.client_operation_id LIKE 'supplier-dn:%'
+           GROUP BY gl.variant_id`,
+          [poId, orgId],
+        );
+        const pendingByVariant = new Map<string, number>();
+        for (const r of pending.rows) pendingByVariant.set(r.variantId as string, Number(r.quantity));
+        for (const [i, l] of lines.entries()) {
+          const pl = byVariant.get(l.variantId);
+          if (!pl) throw new BadRequestException(`lines[${i}].variantId: not a line on this purchase order`);
+          const remaining =
+            Number(pl.quantity) - Number(pl.received) - (pendingByVariant.get(l.variantId) ?? 0);
+          if (Number(l.quantity) <= 0 || Number(l.quantity) > remaining) {
+            throw new BadRequestException(
+              `lines[${i}]: delivery of ${l.quantity} exceeds the ${pl.quantity} ordered (${pl.received} already received)`,
+            );
+          }
+        }
+
+        // Idempotency: keyed on the PO + lines — retrying the same drop
+        // (even with a different note) resolves to the same draft; a different
+        // quantity creates a new one (Invariant 4).
+        const opId =
+          "supplier-dn:" + createHash("sha256").update(JSON.stringify({ poId, lines })).digest("hex");
+        const existing = await tx.query(
+          "SELECT id, document_no AS \"documentNo\", status FROM goods_receipts WHERE org_id = $1 AND client_operation_id = $2",
+          [orgId, opId],
+        );
+        if (existing.rows.length > 0) {
+          return { id: existing.rows[0].id, documentNo: existing.rows[0].documentNo, status: existing.rows[0].status };
+        }
+
+        const grn = await tx.query(
+          `INSERT INTO goods_receipts (org_id, branch_id, supplier_id, document_no, client_operation_id, po_id, notes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id, document_no AS "documentNo"`,
+          [orgId, poRow.branch_id, supplierId, docNo("DN"), opId, poId, notes ?? `Supplier delivery note for ${poRow.document_no}`],
+        );
+        for (const [i, l] of lines.entries()) {
+          const cost = byVariant.get(l.variantId)!.cost;
+          await tx.query(
+            `INSERT INTO goods_receipt_lines (org_id, goods_receipt_id, line_no, variant_id, quantity, unit_cost)
+             VALUES ($1, $2, $3, $4, $5::numeric(14,4), $6::numeric(14,4))`,
+            [orgId, grn.rows[0].id, i + 1, l.variantId, l.quantity, cost],
+          );
+        }
+        await this.audit.write(
+          tx,
+          "supplier.delivery_note",
+          "goods_receipt",
+          grn.rows[0].id as string,
+          null,
+          JSON.stringify({ poId, documentNo: grn.rows[0].documentNo, lines: lines.length }),
+        );
+        return { id: grn.rows[0].id, documentNo: grn.rows[0].documentNo, status: "draft" };
       },
     );
   }
@@ -241,8 +358,62 @@ export class GrnsService {
     claims: JwtPayloadClaims,
     grnId: string,
   ): Promise<unknown> {
-    const grn = await tx.query("SELECT * FROM goods_receipts WHERE id = $1 AND org_id = $2 AND status = 'draft'", [grnId, claims.org]);
+    const grn = await tx.query(
+      "SELECT id, branch_id, client_operation_id, po_id, document_no FROM goods_receipts WHERE id = $1 AND org_id = $2 AND status = 'draft'",
+      [grnId, claims.org],
+    );
     if (grn.rows.length === 0) throw new NotFoundException("GRN not found or not draft");
+    const target = grn.rows[0] as {
+      id: string;
+      branch_id: string;
+      client_operation_id: string;
+      po_id: string | null;
+      document_no: string;
+    };
+
+    // A supplier delivery note is a batch declaration against its PO: posting
+    // one approves the whole batch, so every pending delivery-note GRN for the
+    // same PO posts together — stock and PO received-quantity can never
+    // disagree with what the supplier declared (Invariant 3).
+    const toPost: string[] = [grnId];
+    if (target.po_id && target.client_operation_id.startsWith("supplier-dn:")) {
+      const siblings = await tx.query(
+        `SELECT id FROM goods_receipts
+         WHERE po_id = $1 AND org_id = $2 AND status = 'draft' AND client_operation_id LIKE 'supplier-dn:%'
+         ORDER BY created_at`,
+        [target.po_id, claims.org],
+      );
+      for (const s of siblings.rows) {
+        if (!toPost.includes(s.id as string)) toPost.push(s.id as string);
+      }
+    }
+
+    for (const id of toPost) {
+      await this.postOne(tx, claims, id);
+    }
+
+    // Receipt against a PO: ledger rows (above) and the PO received-quantity
+    // update commit in the SAME transaction (Invariant 3), then the PO's
+    // status is recomputed and events enqueued for the webhook dispatcher.
+    if (target.po_id) {
+      await this.applyPoReceipt(tx, claims.org, toPost);
+    }
+
+    await this.audit.write(tx, "grn.post", "goods_receipt", grnId, null, JSON.stringify({ documentNo: target.document_no, lines: toPost.length }));
+    return this.load(tx, claims.org, grnId);
+  }
+
+  /**
+   * Ledger movement + status flip for a single draft GRN — shared by the
+   * normal post path and the supplier delivery-note batch post.
+   */
+  private async postOne(tx: DbExecutor, claims: JwtPayloadClaims, grnId: string): Promise<void> {
+    const grn = await tx.query(
+      "SELECT branch_id, client_operation_id FROM goods_receipts WHERE id = $1 AND org_id = $2 AND status = 'draft'",
+      [grnId, claims.org],
+    );
+    if (grn.rows.length === 0) throw new NotFoundException("GRN not found or not draft");
+    const row = grn.rows[0] as { branch_id: string; client_operation_id: string };
 
     const lines = await tx.query(
       "SELECT line_no, variant_id, quantity, unit_cost, batch_no, expiry_date FROM goods_receipt_lines WHERE goods_receipt_id = $1 ORDER BY line_no",
@@ -266,7 +437,7 @@ export class GrnsService {
            UNION ALL
            SELECT id FROM batches WHERE org_id = $1 AND branch_id = $2 AND variant_id = $3 AND batch_no = $4
            LIMIT 1`,
-          [claims.org, grn.rows[0].branch_id, line.variant_id, line.batch_no, line.expiry_date, line.unit_cost, grnId],
+          [claims.org, row.branch_id, line.variant_id, line.batch_no, line.expiry_date, line.unit_cost, grnId],
         );
         batchId = b.rows[0].id as string;
       }
@@ -279,13 +450,13 @@ export class GrnsService {
                  'grn', $7, 'grn:' || $8 || ':' || $9, now(), $10, $11, $12)`,
         [
           claims.org,
-          grn.rows[0].branch_id,
+          row.branch_id,
           line.variant_id,
           line.quantity,
           line.unit_cost,
           batchId,
           grnId,
-          grn.rows[0].client_operation_id,
+          row.client_operation_id,
           line.line_no,
           claims.sub,
           claims.dev ?? null,
@@ -294,34 +465,29 @@ export class GrnsService {
       );
     }
 
-    const r = await tx.query(
-      `UPDATE goods_receipts SET status = 'posted', posted_at = now() WHERE id = $1 AND org_id = $2 RETURNING ${GRN_COLS}`,
+    await tx.query(
+      `UPDATE goods_receipts SET status = 'posted', posted_at = now() WHERE id = $1 AND org_id = $2`,
       [grnId, claims.org],
     );
-
-    // Receipt against a PO: ledger rows (above) and the PO received-quantity
-    // update commit in the SAME transaction (Invariant 3), then the PO's
-    // status is recomputed and events enqueued for the webhook dispatcher.
-    if (grn.rows[0].po_id) {
-      await this.applyPoReceipt(tx, claims.org, grnId);
-    }
-
-    await this.audit.write(tx, "grn.post", "goods_receipt", grnId, null, JSON.stringify({ documentNo: grn.rows[0].document_no, lines: lines.rows.length }));
-    return this.load(tx, claims.org, grnId);
   }
 
   /**
-   * Applies a posted GRN to its purchase order: accumulates received_quantity
+   * Applies posted GRNs to their purchase order: accumulates received_quantity
    * per line and recomputes the PO status (sent → partially_received →
-   * received). Both the ledger movement and this update already happened in
-   * the caller's transaction, so a replayed GRN can never double-count.
+   * received). A supplier delivery-note batch passes all of its GRN ids so the
+   * whole declared batch lands on the PO in one shot. Both the ledger movement
+   * and this update already happened in the caller's transaction, so a replayed
+   * GRN can never double-count.
    */
-  private async applyPoReceipt(tx: DbExecutor, orgId: string, grnId: string): Promise<void> {
-    const grn = await tx.query("SELECT po_id, document_no FROM goods_receipts WHERE id = $1 AND org_id = $2", [grnId, orgId]);
+  private async applyPoReceipt(tx: DbExecutor, orgId: string, grnIds: string[]): Promise<void> {
+    const grn = await tx.query(
+      "SELECT po_id FROM goods_receipts WHERE id = ANY($1) AND org_id = $2 LIMIT 1",
+      [grnIds, orgId],
+    );
     const poId = grn.rows[0].po_id as string;
     const lines = await tx.query(
-      "SELECT variant_id, quantity FROM goods_receipt_lines WHERE goods_receipt_id = $1 AND org_id = $2",
-      [grnId, orgId],
+      "SELECT variant_id, quantity FROM goods_receipt_lines WHERE goods_receipt_id = ANY($1) AND org_id = $2",
+      [grnIds, orgId],
     );
 
     for (const line of lines.rows) {

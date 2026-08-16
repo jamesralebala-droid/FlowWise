@@ -33,6 +33,7 @@ fun HomeScreen(
     authManager: AuthManager,
     pendingOps: Int,
     onTill: () -> Unit,
+    onRefunds: () -> Unit,
     onStock: () -> Unit,
     onProcurement: () -> Unit,
     onCustomers: () -> Unit,
@@ -64,6 +65,7 @@ fun HomeScreen(
         Spacer(Modifier.height(24.dp))
 
         ModuleCard("Till", "Ring sales over the counter — works offline, syncs on reconnect", MaterialTheme.colorScheme.primary, onTill)
+        ModuleCard("Refunds", "Refund a completed sale — mobile-money refunds return to the customer's wallet", MaterialTheme.colorScheme.primary, onRefunds)
         ModuleCard("Stock", "Balances, low-stock alerts, GRNs, counts, transfers, adjustments", MaterialTheme.colorScheme.secondary, onStock)
         ModuleCard("Procurement", "Reorder suggestions → purchase orders", MaterialTheme.colorScheme.tertiary, onProcurement)
         ModuleCard("Customers", "Accounts, credit sales and payments", MaterialTheme.colorScheme.tertiary, onCustomers)
