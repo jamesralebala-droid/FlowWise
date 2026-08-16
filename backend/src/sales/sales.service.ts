@@ -2,10 +2,16 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from "@nes
 import { DB_TOKEN } from "../db/constants.js";
 import type { Db, DbExecutor } from "../db/db.js";
 import { AuditService } from "../auth/audit.service.js";
+import { env } from "../env.js";
 import type { JwtPayloadClaims } from "../auth/jwt.service.js";
+import { MobileMoneyService, createMobileMoneyPayment } from "../mobile-money/mobile-money.service.js";
 
 const DECIMAL_RE = /^\d{1,12}(\.\d{1,4})?$/;
 const TENDER_TYPES = new Set(["cash", "card", "mobile_money", "credit", "other"]);
+
+/** Round to 4dp with banker-safe arithmetic (money is numeric(14,4) in SQL). */
+const round4 = (n: number): number => Math.round(n * 10000) / 10000;
+const fmt = (n: number): string => n.toFixed(4);
 
 export interface SaleLineInput {
   variantId: string;
@@ -37,6 +43,10 @@ export interface CreateSaleInput {
   shiftId?: string;
   /** Phase 5: account customer. Required when any tender is 'credit'. */
   customerId?: string;
+  /** Phase 6: discount promotion code (validated + usage counted server-side). */
+  promotionCode?: string;
+  /** Phase 6: loyalty points to spend against the total (requires customerId). */
+  loyaltyRedeem?: { points: number };
   notes?: string;
   lines: SaleLineInput[];
   tenders: SaleTenderInput[];
@@ -65,6 +75,7 @@ export class SalesService {
   constructor(
     @Inject(DB_TOKEN) private readonly db: Db,
     private readonly audit: AuditService,
+    private readonly mobileMoney: MobileMoneyService,
   ) {}
 
   // -- create (complete) ------------------------------------------------------
@@ -83,9 +94,12 @@ export class SalesService {
     for (const [i, t] of (input.tenders ?? []).entries()) {
       if (!TENDER_TYPES.has(t.tenderType)) throw new BadRequestException(`tenders[${i}].tenderType is invalid`);
       assertDecimal(t.amount, `tenders[${i}].amount`, true);
+      if (t.tenderType === "mobile_money" && !t.reference?.trim()) {
+        throw new BadRequestException(`tenders[${i}].reference (the customer's mobile number) is required for mobile money`);
+      }
     }
 
-    return this.db.withContext(
+    const sale = await this.db.withContext(
       { orgId: claims.org, userId: claims.sub, deviceId: claims.dev },
       async (tx) => {
         // Invariant 4: a retried upload resolves to the same sale.
@@ -100,6 +114,24 @@ export class SalesService {
         return this.completeSale(tx, claims, { ...input, clientOperationId: opId });
       },
     );
+
+    // Mobile money: drive the provider AFTER the sale transaction commits
+    // (never a network call inside the transaction). The payment row was
+    // created with the sale; initiateForSale only touches rows still pending.
+    const tenders = (sale as { tenders?: { tenderType: string; amount: string; reference?: string | null }[] }).tenders ?? [];
+    const mobile = tenders.find((t) => t.tenderType === "mobile_money");
+    if (mobile) {
+      await this.mobileMoney.initiateForSale(claims, (sale as { id: string }).id, mobile.reference ?? "", mobile.amount);
+      // Re-load so the response carries the payment status the provider
+      // returned (the first snapshot was taken before initiation).
+      const saleId = (sale as { id: string }).id;
+      return this.db.withContext(
+        { orgId: claims.org, userId: claims.sub, deviceId: claims.dev },
+        (tx) => this.loadSale(tx, claims.org, saleId),
+      );
+    }
+
+    return sale;
   }
 
   private async completeSale(
@@ -107,7 +139,13 @@ export class SalesService {
     claims: JwtPayloadClaims,
     input: CreateSaleInput,
   ): Promise<unknown> {
-    const org = await tx.query("SELECT vat_rate FROM organisations WHERE id = $1", [claims.org]);
+    const org = await tx.query(
+      `SELECT vat_rate,
+              loyalty_earn_points_per_bwp AS "loyaltyEarnRate",
+              loyalty_redeem_bwp_per_point AS "loyaltyRedeemValue"
+       FROM organisations WHERE id = $1`,
+      [claims.org],
+    );
     if (org.rows.length === 0) throw new NotFoundException("Organisation not found");
     const taxRate = org.rows[0].vat_rate as string;
 
@@ -173,10 +211,83 @@ export class SalesService {
     );
     const tendered = (tenderedRow.rows[0].tendered as string) ?? "0.0000";
 
+    // Phase 6: promotion + loyalty resolution. Everything is validated BEFORE
+    // the sale row is written, and all counters/points rows are written in
+    // this same transaction — a failure rolls the whole thing back, so a
+    // usage counter or points row can never exist without its document.
+    const pricedTotals = await tx.query(
+      "SELECT COALESCE(SUM(line_total), 0)::numeric(14,4) AS subtotal, COALESCE(SUM(tax_amount), 0)::numeric(14,4) AS tax_full FROM _sale_priced",
+    );
+    const subtotal = Number(pricedTotals.rows[0].subtotal);
+    const taxAtFull = Number(pricedTotals.rows[0].tax_full);
+    const customerId = input.customerId?.trim() || null;
+
+    let promotionId: string | null = null;
+    let promotionDiscount = 0;
+    if (input.promotionCode?.trim()) {
+      const promo = await tx.query(
+        `SELECT id, discount_type AS "discountType", discount_value AS "discountValue",
+                min_spend AS "minSpend", usage_limit AS "usageLimit", times_used AS "timesUsed",
+                starts_at AS "startsAt", ends_at AS "endsAt", is_active AS "isActive"
+         FROM promotions WHERE org_id = $1 AND lower(code) = $2`,
+        [claims.org, input.promotionCode.trim().toLowerCase()],
+      );
+      if (promo.rows.length === 0) throw new BadRequestException("Unknown promotion code");
+      const p = promo.rows[0];
+      if (!p.isActive) throw new BadRequestException("Promotion is not active");
+      const nowMs = Date.now();
+      if (p.startsAt && new Date(p.startsAt as string).getTime() > nowMs) {
+        throw new BadRequestException("Promotion has not started");
+      }
+      if (p.endsAt && new Date(p.endsAt as string).getTime() < nowMs) {
+        throw new BadRequestException("Promotion has ended");
+      }
+      if (Number(p.minSpend) > subtotal) {
+        throw new BadRequestException(`Promotion requires a minimum spend of P ${Number(p.minSpend).toFixed(2)}`);
+      }
+      if (p.usageLimit !== null && Number(p.timesUsed) >= Number(p.usageLimit)) {
+        throw new BadRequestException("Promotion usage limit reached");
+      }
+      promotionDiscount =
+        p.discountType === "percentage"
+          ? round4(subtotal * Number(p.discountValue))
+          : Math.min(Number(p.discountValue), subtotal);
+      if (promotionDiscount <= 0) throw new BadRequestException("Promotion yields no discount on this basket");
+      promotionId = p.id as string;
+    }
+
+    // Loyalty: points the customer chooses to spend (a second discount
+    // component, capped at the payable). The balance is a derived view.
+    let loyaltyPointsUsed = 0;
+    let loyaltyCredit = 0;
+    if (input.loyaltyRedeem && Number(input.loyaltyRedeem.points) > 0) {
+      if (!customerId) throw new BadRequestException("customerId is required to redeem loyalty points");
+      const points = Number(input.loyaltyRedeem.points);
+      if (!Number.isInteger(points) || points <= 0) {
+        throw new BadRequestException("loyaltyRedeem.points must be a positive integer");
+      }
+      const bal = await tx.query(
+        "SELECT COALESCE(points, 0)::int AS points FROM v_customer_loyalty WHERE org_id = $1 AND customer_id = $2",
+        [claims.org, customerId],
+      );
+      if (Number(bal.rows[0].points) < points) throw new BadRequestException("Insufficient loyalty points");
+      loyaltyPointsUsed = points;
+    }
+
+    // Discounts shrink the taxable base proportionally (per-line tax rates
+    // stay exact), then loyalty credit comes off the payable.
+    const taxable = subtotal - promotionDiscount;
+    const taxTotal = subtotal > 0 ? round4(taxAtFull * (taxable / subtotal)) : 0;
+    const payable = round4(taxable + taxTotal);
+    if (loyaltyPointsUsed > 0) {
+      loyaltyCredit = Math.min(round4(loyaltyPointsUsed * Number(org.rows[0].loyaltyRedeemValue)), payable);
+    }
+    const total = round4(payable - loyaltyCredit);
+    const earnedPoints = customerId && total > 0 ? Math.floor(total * Number(org.rows[0].loyaltyEarnRate)) : 0;
+
     // Phase 5 credit: the credit tender portion becomes a receivable on the
     // customer's account IN THE SAME TRANSACTION as the sale (Invariant 3).
     const creditTenders = (input.tenders ?? []).filter((t) => t.tenderType === "credit");
-    const customerId = input.customerId?.trim() || null;
     let creditPortion = "0.0000";
     if (creditTenders.length > 0) {
       if (!customerId) throw new BadRequestException("customerId is required for credit sales");
@@ -206,16 +317,13 @@ export class SalesService {
     const sale = await tx.query(
       `INSERT INTO sales
          (org_id, branch_id, user_id, device_id, shift_id, customer_id, client_operation_id, status,
-          subtotal, discount, tax_total, total, tendered, change_due, notes, completed_at)
-       SELECT $1, $2, $3, $4, $5, $6, $7, 'completed',
-              (SELECT COALESCE(SUM(line_total), 0) FROM _sale_priced),
-              0,
-              (SELECT COALESCE(SUM(tax_amount), 0) FROM _sale_priced),
-              (SELECT COALESCE(SUM(line_total + tax_amount), 0) FROM _sale_priced),
-              $8::numeric(14,4),
-              GREATEST($8::numeric(14,4) - (SELECT COALESCE(SUM(line_total + tax_amount), 0) FROM _sale_priced), 0),
-              $9, now()
-       RETURNING id, subtotal, tax_total, total, tendered, change_due`,
+          subtotal, discount, tax_total, total, tendered, change_due,
+          promotion_id, loyalty_points_used, loyalty_credit, notes, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed',
+               $8::numeric(14,4), $9::numeric(14,4), $10::numeric(14,4), $11::numeric(14,4),
+               $12::numeric(14,4), GREATEST($12::numeric(14,4) - $11::numeric(14,4), 0),
+               $13, $14::int, $15::numeric(14,4), $16, now())
+       RETURNING id, subtotal, discount, tax_total, total, tendered, change_due`,
       [
         claims.org,
         input.branchId,
@@ -224,7 +332,14 @@ export class SalesService {
         input.shiftId ?? null,
         customerId,
         input.clientOperationId,
+        fmt(subtotal),
+        fmt(promotionDiscount),
+        fmt(taxTotal),
+        fmt(total),
         tendered,
+        promotionId,
+        loyaltyPointsUsed,
+        fmt(loyaltyCredit),
         input.notes ?? null,
       ],
     );
@@ -251,6 +366,71 @@ export class SalesService {
           claims.sub,
           claims.dev ?? null,
         ],
+      );
+    }
+
+    // Promotion usage counter — same transaction as the sale (never drifts).
+    if (promotionId) {
+      await tx.query("UPDATE promotions SET times_used = times_used + 1 WHERE id = $1 AND org_id = $2", [
+        promotionId,
+        claims.org,
+      ]);
+    }
+
+    // Loyalty earn/redeem — append-only rows, replay-safe on the client op id.
+    if (customerId && earnedPoints > 0) {
+      await tx.query(
+        `INSERT INTO loyalty_transactions
+           (org_id, customer_id, sale_id, entry_type, points, reference_type, reference_id, notes,
+            client_operation_id, business_time, created_by_user_id, created_by_device_id)
+         VALUES ($1, $2, $3, 'earn', $4::int, 'sale', $5, $6, $7, now(), $8, $9)
+         ON CONFLICT (org_id, client_operation_id) DO NOTHING`,
+        [
+          claims.org,
+          customerId,
+          saleId,
+          earnedPoints,
+          saleId,
+          `Earned on sale ${input.clientOperationId.slice(0, 8).toUpperCase()}`,
+          `sale:${input.clientOperationId}:loyalty:earn`,
+          claims.sub,
+          claims.dev ?? null,
+        ],
+      );
+    }
+    if (customerId && loyaltyPointsUsed > 0) {
+      await tx.query(
+        `INSERT INTO loyalty_transactions
+           (org_id, customer_id, sale_id, entry_type, points, reference_type, reference_id, notes,
+            client_operation_id, business_time, created_by_user_id, created_by_device_id)
+         VALUES ($1, $2, $3, 'redeem', -$4::int, 'sale', $5, $6, $7, now(), $8, $9)
+         ON CONFLICT (org_id, client_operation_id) DO NOTHING`,
+        [
+          claims.org,
+          customerId,
+          saleId,
+          loyaltyPointsUsed,
+          saleId,
+          `Loyalty redemption P ${fmt(loyaltyCredit)}`,
+          `sale:${input.clientOperationId}:loyalty:redeem`,
+          claims.sub,
+          claims.dev ?? null,
+        ],
+      );
+    }
+
+    // Mobile money tender → pending payment row IN this transaction (Invariant 3).
+    for (const t of input.tenders ?? []) {
+      if (t.tenderType !== "mobile_money") continue;
+      await createMobileMoneyPayment(
+        tx,
+        claims.org,
+        input.branchId,
+        saleId,
+        env.mobileMoneyProvider,
+        t.reference!.trim(),
+        t.amount,
+        input.clientOperationId,
       );
     }
 
@@ -450,6 +630,38 @@ export class SalesService {
           );
         }
 
+        // Loyalty: reverse exactly what the sale earned/spent (append-only,
+        // replay-safe on the refund's client op id). Spending points before a
+        // refund can push a balance negative — future earnings offset it.
+        if (creditCustomer) {
+          const loyalty = await tx.query(
+            `SELECT entry_type AS "entryType", points
+             FROM loyalty_transactions
+             WHERE org_id = $1 AND sale_id = $2 AND entry_type IN ('earn', 'redeem')`,
+            [claims.org, input.saleId],
+          );
+          for (const row of loyalty.rows) {
+            const kind = row.entryType === "earn" ? "earn" : "redeem";
+            await tx.query(
+              `INSERT INTO loyalty_transactions
+                 (org_id, customer_id, sale_id, entry_type, points, reference_type, reference_id, notes,
+                  client_operation_id, business_time, created_by_user_id, created_by_device_id)
+               VALUES ($1, $2, NULL, 'refund_reverse', -$3::int, 'sale_refund', $4, $5, $6, now(), $7, $8)
+               ON CONFLICT (org_id, client_operation_id) DO NOTHING`,
+              [
+                claims.org,
+                creditCustomer,
+                row.points,
+                refundId,
+                `Refund reverses ${kind} (${String(row.points)} pts)`,
+                `refund:${opId}:loyalty:${kind}`,
+                claims.sub,
+                claims.dev ?? null,
+              ],
+            );
+          }
+        }
+
         // Reverse the ORIGINAL sale's ledger rows, per batch — restoration is
         // faithful to exactly what was sold (batch-aware; reproducible from
         // the ledger alone, never from client claims).
@@ -523,7 +735,9 @@ export class SalesService {
       `SELECT id, branch_id AS "branchId", user_id AS "userId", device_id AS "deviceId",
               shift_id AS "shiftId", customer_id AS "customerId", client_operation_id AS "clientOperationId", status,
               subtotal, discount, tax_total AS "taxTotal", total, tendered,
-              change_due AS "changeDue", business_time AS "businessTime", notes,
+              change_due AS "changeDue", promotion_id AS "promotionId",
+              loyalty_points_used AS "loyaltyPointsUsed", loyalty_credit AS "loyaltyCredit",
+              business_time AS "businessTime", notes,
               completed_at AS "completedAt"
        FROM sales WHERE id = $1 AND org_id = $2`,
       [saleId, orgId],
@@ -542,6 +756,12 @@ export class SalesService {
        FROM sale_tenders WHERE sale_id = $1 AND org_id = $2 ORDER BY id`,
       [saleId, orgId],
     );
-    return { ...sale.rows[0], lines: lines.rows, tenders: tenders.rows };
+    const payments = await tx.query(
+      `SELECT id, provider, phone, amount, status, provider_reference AS "providerReference",
+              provider_status AS "providerStatus", error, confirmed_at AS "confirmedAt", created_at AS "createdAt"
+       FROM mobile_money_payments WHERE sale_id = $1 AND org_id = $2 ORDER BY created_at`,
+      [saleId, orgId],
+    );
+    return { ...sale.rows[0], lines: lines.rows, tenders: tenders.rows, payments: payments.rows };
   }
 }

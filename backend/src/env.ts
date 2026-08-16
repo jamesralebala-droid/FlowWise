@@ -18,6 +18,12 @@ export interface Env {
   resendApiKey?: string;
   /** From-address for receipt emails (must be a verified sender on Resend). */
   receiptEmailFrom: string;
+  /** Mobile-money provider (Phase 6): 'mock' (default, auto-confirms) or 'dodo'. */
+  mobileMoneyProvider: "mock" | "dodo";
+  /** Dodo Payments API key (Phase 6). Absent → provider falls back to mock behaviour. */
+  dodoApiKey?: string;
+  /** Dodo webhook secret used to verify /v1/mobile-money/webhook signatures. */
+  dodoWebhookSecret?: string;
 }
 
 export function loadEnv(): Env {
@@ -42,6 +48,9 @@ export function loadEnv(): Env {
     authAttemptWindowSeconds: Number(process.env.AUTH_ATTEMPT_WINDOW_SECONDS ?? 900),
     resendApiKey: process.env.RESEND_API_KEY || undefined,
     receiptEmailFrom: process.env.RECEIPT_EMAIL_FROM ?? "FlowWise Receipts <onboarding@resend.dev>",
+    mobileMoneyProvider: process.env.MOBILE_MONEY_PROVIDER === "dodo" ? "dodo" : "mock",
+    dodoApiKey: process.env.DODO_API_KEY || undefined,
+    dodoWebhookSecret: process.env.DODO_WEBHOOK_SECRET || undefined,
   };
 }
 

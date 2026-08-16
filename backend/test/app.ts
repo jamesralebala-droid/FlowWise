@@ -10,7 +10,7 @@ export async function createTestApp(fx: Fixtures): Promise<INestApplication> {
     .overrideProvider(DB_TOKEN)
     .useValue(fx.db)
     .compile();
-  const app = moduleRef.createNestApplication();
+  const app = moduleRef.createNestApplication({ rawBody: true });
   app.setGlobalPrefix("v1");
   await app.init();
   return app;

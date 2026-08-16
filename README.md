@@ -10,15 +10,21 @@ everything reconciles exactly, replay-safe, against a single source of truth.
 > **Status: Phase 0 (Foundation) ✅ + Phase 1 (POS core) ✅ + Phase 2
 > (Inventory ops) ✅ + Phase 3 (Procurement & intelligence) ✅ + Phase 4
 > (Hardening & rollout) ✅ + Phase 5 (Customers, credit, reports & eReceipts)
-> ✅ — implemented & test-verified in this repo.**
+> ✅ + Phase 6 (Mobile money, loyalty & discounts, web reports, receipt
+> printing) ✅ — implemented & test-verified in this repo.**
 > Backend: NestJS + PostgreSQL 15+ (migrations, RLS, OAuth2 PKCE, ledger
 > invariants, sales/shifts/outbox/reports, GRN/batches/FEFO/counts/transfers/
 > adjustments, reorder rules/suggestions, purchase orders with partial
 > receipts, supplier scorecard, webhooks; Phase 4: login throttling, audit
 > API, CSV data import, load test, backup/restore runbook; Phase 5:
 > customer accounts + credit sales + settlements (append-only ledger),
-> stock-valuation/margin/top-products reports, and eReceipts via Resend.
-> Android: source-only (builds in CI via `gradle :app:assembleDebug`).
+> stock-valuation/margin/top-products reports, and eReceipts via Resend;
+> Phase 6: promotions/discount codes, loyalty points (earn + redeem),
+> mobile-money tender (Dodo Payments, webhook-confirmed), a Vite + React
+> web reports dashboard (OAuth2 PKCE), and ESC/POS thermal receipt printing
+> from the till.
+> Android: builds in CI via `gradle :app:assembleDebug`.
+> Web: builds in CI via `vite build`.
 
 ## The five invariants (non-negotiable)
 
@@ -39,19 +45,25 @@ backend/          NestJS + TypeScript API (REST /v1)
   migrations/     001 tenancy/RBAC/OAuth/RLS · 002 catalogue · 003 ledger
                  · 004 sales · 005 shifts/cash-up · 006 inventory ops
                  · 007 procurement · 008 hardening (throttle, data import)
-                 · 009 customers/credit/eReceipts
+                 · 009 customers/credit/eReceipts · 010 promotions/loyalty/
+                 mobile money
   src/            db layer, OAuth2 PKCE, guards, catalogue, idempotency,
                   sales, shifts, outbox, reports, audit, import, inventory
                   (suppliers, GRNs, transfers, counts, adjustments, stock
                   views), procurement (reorder rules/evaluator, POs,
                   webhooks, scorecard), customers (accounts, ledger,
-                  settlements), receipts (eReceipt email via Resend)
+                  settlements), receipts (eReceipt email via Resend),
+                  promotions (discount codes), mobile-money (provider
+                  adapters, webhook)
   test/           PGlite-backed integration tests (RLS, ledger, OAuth,
                   catalogue, sales, shifts, outbox, reports, inventory,
                   FEFO, procurement, import, throttling, customers,
-                  receipts, Phase-5 reports)
+                  receipts, Phase-5 reports, Phase-6 promotions/loyalty/
+                  mobile money)
   scripts/        test.sh · loadtest.ts · backup.sh · restore.sh
-android/          Kotlin + Jetpack Compose app (Room/SQLCipher, WorkManager, ML Kit)
+android/          Kotlin + Jetpack Compose app (Room/SQLCipher, WorkManager,
+                  ML Kit, ESC/POS thermal printing)
+web/              Vite + React reports dashboard (OAuth2 PKCE, recharts)
 docs/OPS.md       Operations runbook: deploy, backup/restore, monitoring,
                   incident response, pilot + training checklists
 ```
@@ -108,6 +120,14 @@ a no-op (verified by `test/seed.test.ts`). The Android app uses OAuth client
 | `AUTH_ATTEMPT_WINDOW_SECONDS` | `900` | Throttle sliding window; failures age out |
 | `RESEND_API_KEY` | *(unset)* | eReceipts: Resend API key. Without it, email ops record `skipped` and sales never break |
 | `RECEIPT_EMAIL_FROM` | `FlowWise <onboarding@resend.dev>` | eReceipt sender address (verify your domain in Resend) |
+| `DODO_API_KEY` | *(unset)* | Mobile money: Dodo Payments secret key. Unset → `mock` provider (instantly confirms, demo/sandbox) |
+| `DODO_WEBHOOK_SECRET` | *(unset)* | Mobile money: HMAC secret verifying `POST /v1/mobile-money/webhook`. Unset → webhook refuses every callback |
+
+**Web dashboard:** `web/` is a Vite + React app (`bun --cwd web dev` for the
+dev server, default `http://localhost:5173`). It signs in through the same
+OAuth2 PKCE endpoint and reads the reports APIs; point it at the API with
+`VITE_API_BASE_URL` (default `http://localhost:4000/v1`). The build emits
+static files to `web/dist/` (CI: `vite build`).
 
 **Production setup notes:** run migrations and seeds as a BYPASSRLS migrator
 role; run the API as a role granted table DML on the `public` schema (RLS
@@ -273,26 +293,85 @@ tender-type allocation is a Phase 2 refinement (refunds currently net against
   incident runbook, the one-branch pilot checklist and the role training
   plan (Phase 4 exit criteria).
 
+### Phase 6 (mobile money, loyalty & discounts, web dashboard, receipt printing — verified by `bun run test`)
+
+| Endpoint | Permission | Purpose |
+| --- | --- | --- |
+| `GET /v1/promotions[?activeOnly]` · `POST /v1/promotions` · `PUT /:id` | `promotion.manage` | Discount codes: percentage or amount, min-spend, usage limit, start/end window, active toggle. `usageLimit` counts redemptions server-side |
+| `POST /v1/sales` (with `promotionCode`) | `pos.sell` | Promotion applied + **usage counter incremented in the same transaction** as the sale; unknown/expired/over-limit codes rejected before any ledger write |
+| `POST /v1/sales` (with `customerId` + `loyaltyRedeem.points`) | `pos.sell` | Redeem points against the total (`loyalty_redeem_bwp_per_point`, capped at the payable); insufficient points rejected before any ledger write |
+| `GET /v1/mobile-money/payments[?branchId&status&since&limit]` | `payment.read` | Payment statuses for the till/back-office pull (the other half of async reconcile) |
+| `POST /v1/mobile-money/webhook` | *(public)* | Provider callback. HMAC-SHA256 verified against `DODO_WEBHOOK_SECRET` over the raw body; confirms/fails the payment by provider reference across orgs (SECURITY DEFINER) |
+
+**Phase 6 notes:**
+
+- **Loyalty is a ledger, not a balance.** `loyalty_transactions` is
+  append-only (earn on paid sales with a customer, redeem on request, exact
+  reversal on refund); `v_customer_loyalty` derives the balance. Earn/redeem
+  rows write inside the sale transaction with `client_operation_id`-scoped
+  idempotency keys, so an offline till can never double-earn on a retry.
+  Rates are per-org: `loyalty_earn_points_per_bwp` (default 0.1, i.e. 1
+  point per P10) and `loyalty_redeem_bwp_per_point` (default P0.10 per
+  point).
+- **Promotions are server-validated.** The till sends the code; the service
+  checks active/window/min-spend/usage-limit and bumps `times_used` in the
+  sale transaction — a replayed sale cannot burn the cap twice.
+- **Mobile money is async and never blocks the till.** A mobile-money
+  tender inserts a `pending` `mobile_money_payments` row *inside* the sale
+  transaction; the provider initiate runs after commit (a failure marks the
+  row `failed`, the sale stands); confirmation arrives via the signed
+  webhook or the status pull. Provider is pluggable: `mock` (default,
+  instantly confirms — sandbox/demo) or `dodo` behind `DODO_API_KEY`.
+- **Refunds reverse everything.** A refund of a Phase-6 sale reverses the
+  promotion usage count, the exact loyalty earn/redeem rows, and any
+  mobile-money payment row — in the refund's transaction.
+- **Reports surface it.** `sales-summary` adds `discountTotal`, loyalty
+  earn/redeem and mobile-money confirmed/pending totals; `margin` and
+  `top-products` keep working unchanged.
+
 ## Android
 
 `android/` — Kotlin + Jetpack Compose, Room over SQLCipher (encrypted local
 store), `outbox_operations` + `sync_cursors`, WorkManager catalogue sync,
-ML Kit + CameraX barcode scanning. Open in Android Studio and run
-`./gradlew :app:assembleDebug`; set the API base URL via
-`buildConfigField` (default `http://10.0.2.2:4000/v1` for the emulator).
+ML Kit + CameraX barcode scanning, and an ESC/POS thermal printer driver
+(Bluetooth). Open in Android Studio and run `./gradlew :app:assembleDebug`;
+set the API base URL via `buildConfigField` (default
+`http://10.0.2.2:4000/v1` for the emulator).
 
 Screens: Login → Branch select → Home (Till / Stock / Procurement /
 Customers / Reports / Sync queue). The till takes cash, card, mobile-money
 **and credit** tenders with quick amounts and live change — a credit tender
-requires picking a customer account (balance shown inline) — and can queue
-an **eReceipt** by entering the customer's email before completing. Sales,
-GRNs, transfers, adjustments, **settlements** and **receipt emails** are
-saved to the local outbox first and pushed via `POST /v1/outbox` by a
-WorkManager worker (auto) or the Sync queue screen (manual "Sync now") —
-same shared flush path, replay-safe via `client_operation_id`. Customers
-gives account balances, creation, statements and offline-queued payments;
-Reports shows the sales summary + tender mix, stock valuation and top
-products for Today / 7 days / 30 days.
+requires picking a customer account (balance shown inline), a mobile-money
+tender requires the customer's phone number (payment reconciles
+asynchronously), and you can queue an **eReceipt** by entering the
+customer's email before completing. Phase 6 adds a **promo-code field** and
+**loyalty redemption** (points shown for the selected customer, capped at
+what they hold) to the till, and the receipt screen prints to a bonded
+Bluetooth thermal printer (ESC/POS, 58 mm, permission-aware). Sales, GRNs,
+transfers, adjustments, **settlements** and **receipt emails** are saved to
+the local outbox first and pushed via `POST /v1/outbox` by a WorkManager
+worker (auto) or the Sync queue screen (manual "Sync now") — same shared
+flush path, replay-safe via `client_operation_id`. Customers gives account
+balances, creation, statements and offline-queued payments; Reports shows
+the sales summary + tender mix, stock valuation and top products for
+Today / 7 days / 30 days.
+
+## Web dashboard
+
+`web/` — a Vite + React reports dashboard for managers and owners: signed
+in with the same OAuth2 PKCE flow as the app (no redirect — the backend's
+native-client JSON endpoints exchange directly), tokens in `sessionStorage`
+with refresh-and-retry. Pages: **Dashboard** (period KPIs, tender-mix pie,
+top products, loyalty + latest mobile-money payments), **Reports** (sales
+summary, daily buckets, stock valuation, margin), **Customers** (searchable
+balances/limits/points + statement viewer), **Payments** (mobile-money
+status with filters) and **Promotions** (create/edit discount codes).
+
+```bash
+bun --cwd web install
+bun --cwd web dev        # http://localhost:5173 (proxy to the API via CORS)
+VITE_API_BASE_URL=https://api.example.com/v1 bun --cwd web build
+```
 
 ## Roadmap
 
@@ -304,6 +383,7 @@ products for Today / 7 days / 30 days.
 | 3 | Reorder rules, forecasting, suggestions→POs, partial receipts, scorecard, webhooks | ✅ backend + tests — Android UI next |
 | 4 | Load/security/restore/device testing, data import, training, pilot | ✅ backend hardening + runbook (`docs/OPS.md`) — pilot checklists ready |
 | 5 | Customer accounts & credit sales, reports & analytics, eReceipts, Android build in CI | ✅ backend + Android + CI (`gradle :app:assembleDebug`) |
+| 6 | Mobile-money tender, loyalty & discounts, web reports dashboard, receipt printing | ✅ backend + Android + web + CI (3 jobs) |
 
 `stock_ledger` → `apply_stock_ledger()` → `inventory_items` (with
 `v_stock_reconciliation`) is already live in migration 003, so Phase 1 builds

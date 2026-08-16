@@ -35,6 +35,7 @@ export interface DemoSeedResult {
   users: number;
   customers: number;
   customerOpeningRows: number;
+  promotions: number;
 }
 
 interface BranchStock {
@@ -242,6 +243,7 @@ export async function seedDemoData(exec: SqlExecutor, passwordHash: string): Pro
     users: 0,
     customers: 0,
     customerOpeningRows: 0,
+    promotions: 0,
   };
 
   // ---- catalogue + opening stock + reorder rules ---------------------------
@@ -382,6 +384,30 @@ export async function seedDemoData(exec: SqlExecutor, passwordHash: string): Pro
         [orgId, userId, a.branch ? branchIdByCode[a.branch] : null, a.role],
       );
     }
+  }
+
+  // ---- Phase 6 demo promotions (idempotent by code) -------------------------
+  const PROMOTIONS: {
+    code: string;
+    name: string;
+    discountType: "percentage" | "amount";
+    discountValue: string;
+    minSpend: string;
+    usageLimit?: number | null;
+  }[] = [
+    { code: "WELCOME10", name: "10% off your basket", discountType: "percentage", discountValue: "0.10", minSpend: "50" },
+    { code: "P50OFF", name: "P50 off orders over P200", discountType: "amount", discountValue: "50", minSpend: "200" },
+    { code: "MONTHEND5", name: "Month-end 5% (100 uses)", discountType: "percentage", discountValue: "0.05", minSpend: "0", usageLimit: 100 },
+  ];
+  for (const p of PROMOTIONS) {
+    const inserted = await exec.query(
+      `INSERT INTO promotions (org_id, code, name, discount_type, discount_value, min_spend, usage_limit)
+       VALUES ($1, $2, $3, $4, $5::numeric(14,4), $6::numeric(14,4), $7)
+       ON CONFLICT (org_id, lower(code)) DO UPDATE SET name = EXCLUDED.name
+       RETURNING id`,
+      [orgId, p.code, p.name, p.discountType, p.discountValue, p.minSpend, p.usageLimit ?? null],
+    );
+    result.promotions += inserted.rows.length;
   }
 
   // ---- OAuth public client --------------------------------------------------

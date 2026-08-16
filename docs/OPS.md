@@ -1,10 +1,11 @@
-# FlowWise — Operations Runbook (Phase 4: Hardening & Rollout)
+# FlowWise — Operations Runbook (Phase 4: Hardening & Rollout, Phase 6 ops)
 
 This document is the operating manual for the FlowWise backend. It covers the
 Phase 4 checklist: **load testing, security hardening, restore/device testing,
-data import, training, and the one-branch pilot**. The five invariants from
-the README are the ground rules for every procedure here — especially "never
-edit data to fix a problem".
+data import, training, and the one-branch pilot** — plus the Phase 6
+operations for mobile-money webhooks and the web dashboard. The five
+invariants from the README are the ground rules for every procedure here —
+especially "never edit data to fix a problem".
 
 ---
 
@@ -13,7 +14,7 @@ edit data to fix a problem".
 Run as the **migrator role** (`BYPASSRLS`), never as the API role:
 
 ```bash
-bun run migrate          # apply backend/migrations/*.sql (001..008)
+bun run migrate          # apply backend/migrations/*.sql (001..010)
 bun run seed:dev         # two-branch demo org: catalogue, suppliers, opening
                          # stock, reorder rules, 6 users (dev only; idempotent)
 ```
@@ -42,6 +43,9 @@ Environment (all values, defaults in `backend/src/env.ts`):
 | `PORT` | `4000` | Binds 0.0.0.0 |
 | `AUTH_MAX_FAILED_ATTEMPTS` | `5` | Failed logins per account+IP before throttling |
 | `AUTH_ATTEMPT_WINDOW_SECONDS` | `900` | Sliding window; failures age out after this |
+| `RESEND_API_KEY` | *(unset)* | eReceipts; unset → emails recorded `skipped`, sales unaffected |
+| `DODO_API_KEY` | *(unset)* | Mobile money; unset → `mock` provider (instantly confirms — demo only) |
+| `DODO_WEBHOOK_SECRET` | *(unset)* | HMAC secret for `POST /v1/mobile-money/webhook`; unset → callbacks rejected |
 
 Deploy smoke test after every release:
 
@@ -199,3 +203,30 @@ count, then fix discrepancies with a *count*, not an edit.
   roles per branch, audit log, backup expectations.
 - **Auditors (20 min):** read-only access, `GET /v1/audit`, reconciliation
   report, immutability guarantees.
+
+## 10. Phase 6 operations (mobile money, web dashboard)
+
+- **Mobile-money webhook.** In production set `DODO_WEBHOOK_SECRET` (and
+  `DODO_API_KEY`). The gateway must POST to
+  `https://<api>/v1/mobile-money/webhook` with header `x-dodo-signature`
+  (hex HMAC-SHA256 of the raw body using the same secret). Without the
+  secret every callback is rejected — a deliberately default-deny path.
+  Payment statuses are also pullable via `GET /v1/mobile-money/payments`,
+  so a lost webhook never loses money: confirm the row on the till by
+  polling.
+- **Reconciliation for mobile money.** A `pending` payment whose sale has
+  already committed is *not* a broken sale — the payment row is
+  best-effort. Investigate via the audit trail (`mobile_money.initiate` /
+  `mobile_money.failed` actions) and re-initiate or settle the difference
+  manually. Never edit the row to "fix" it.
+- **Web dashboard.** Static Vite build in `web/dist` (host it on any static
+  host; e.g. Netlify/Vercel). Set `VITE_API_BASE_URL` at build time to the
+  public API origin. The backend currently exposes `app.enableCors()` (all
+  origins) — tighten it to the dashboard origin in `src/main.ts` before a
+  public deploy. Sessions are browser `sessionStorage`, so a closed tab is a
+  logout; no server-side state.
+- **Loyalty/promotions are money.** Points earn/redeem and promotion usage
+  counters are append-only rows inside sale transactions; a refund reverses
+  them exactly. If balances ever look wrong, audit `loyalty_transactions`
+  and `promotions.times_used` against the sales — never "adjust" a points
+  balance directly.

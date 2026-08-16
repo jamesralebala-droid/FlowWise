@@ -52,14 +52,15 @@ describe("RLS multi-tenancy (Migration 001)", () => {
     const perms = await fx.db.withContext({ orgId: fx.orgA, userId: fx.ownerA }, (tx) => tx.query("SELECT count(*)::int AS n FROM permissions"));
     expect(perms.rows[0].n).toBeGreaterThanOrEqual(22);
     // Phase 5: cashier + customer.read/customer.write (till), auditor + customer.read.
+    // Phase 6: cashier + payment.read, auditor + payment.read (mobile-money status).
     const cashier = await fx.db.withContext({ orgId: fx.orgA, userId: fx.ownerA }, (tx) =>
       tx.query("SELECT count(*)::int AS n FROM role_permissions WHERE role_code = 'cashier'"),
     );
-    expect(cashier.rows[0].n).toBe(7);
+    expect(cashier.rows[0].n).toBe(8);
     const auditor = await fx.db.withContext({ orgId: fx.orgA, userId: fx.ownerA }, (tx) =>
       tx.query("SELECT count(*)::int AS n FROM role_permissions WHERE role_code = 'auditor'"),
     );
-    expect(auditor.rows[0].n).toBe(6);
+    expect(auditor.rows[0].n).toBe(7);
   });
 
   it("the security-definer auth lookup still works without tenant context", async () => {

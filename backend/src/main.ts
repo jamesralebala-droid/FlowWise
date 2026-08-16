@@ -4,7 +4,7 @@ import { AppModule } from "./app.module.js";
 import { env } from "./env.js";
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.setGlobalPrefix("v1");
   app.enableCors();
   await app.listen(env.port, "0.0.0.0");

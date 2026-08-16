@@ -73,8 +73,11 @@ export class ReportsService {
         const totals = await tx.query(
           `SELECT count(*)::int AS "salesCount",
                   COALESCE(SUM(s.subtotal), 0)::numeric(14,4) AS subtotal,
+                  COALESCE(SUM(s.discount), 0)::numeric(14,4) AS "discountTotal",
                   COALESCE(SUM(s.tax_total), 0)::numeric(14,4) AS "taxTotal",
                   COALESCE(SUM(s.total), 0)::numeric(14,4) AS total,
+                  COALESCE(SUM(s.loyalty_credit), 0)::numeric(14,4) AS "loyaltyCredit",
+                  COALESCE(SUM(s.loyalty_points_used), 0)::int AS "pointsRedeemed",
                   COALESCE((SELECT SUM(r.amount)
                             FROM sale_refunds r JOIN sales s2 ON s2.id = r.sale_id
                             WHERE ${refundSubqueryWhere(slots)}), 0)::numeric(14,4) AS "refundTotal"
@@ -93,6 +96,24 @@ export class ReportsService {
           params,
         );
 
+        // Phase 6: loyalty earned and mobile-money reconciliation for the period.
+        const loyalty = await tx.query(
+          `SELECT COALESCE(SUM(lt.points), 0)::int AS "pointsEarned"
+           FROM loyalty_transactions lt JOIN sales s ON s.id = lt.sale_id
+           WHERE ${where} AND lt.entry_type = 'earn'`,
+          params,
+        );
+        const payments = await tx.query(
+          `SELECT count(*)::int AS count,
+                  count(*) FILTER (WHERE m.status = 'confirmed')::int AS "confirmedCount",
+                  count(*) FILTER (WHERE m.status = 'pending')::int AS "pendingCount",
+                  count(*) FILTER (WHERE m.status = 'failed')::int AS "failedCount",
+                  COALESCE(SUM(m.amount) FILTER (WHERE m.status = 'confirmed'), 0)::numeric(14,4) AS "confirmedTotal"
+           FROM mobile_money_payments m JOIN sales s ON s.id = m.sale_id
+           WHERE ${where}`,
+          params,
+        );
+
         const row = totals.rows[0];
         const salesCount = Number(row.salesCount);
         const total = Number(row.total);
@@ -105,6 +126,8 @@ export class ReportsService {
           branchId: f.branchId ?? null,
           totals: { ...row, netTotal, averageSale },
           tenders: tenders.rows,
+          loyalty: { ...loyalty.rows[0], pointsRedeemed: Number(row.pointsRedeemed) },
+          mobileMoney: payments.rows[0],
         };
       },
     );
