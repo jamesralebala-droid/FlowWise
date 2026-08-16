@@ -110,7 +110,7 @@ class RefundState(
      * (shown to the cashier so they can track it in the Sync queue). Works
      * with zero network — the flush happens on reconnect.
      */
-    fun queueRefund(): String? {
+    suspend fun queueRefund(): String? {
         val sale = selected ?: run {
             error = "Pick a sale first"
             return null

@@ -20,11 +20,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.botwise.flowwise.data.refunds.RefundState
 import com.botwise.flowwise.data.refunds.RefundableSale
 import java.math.BigDecimal
+import kotlinx.coroutines.launch
 
 private fun fmt(v: String): String {
     return runCatching { "P " + BigDecimal(v).setScale(2, java.math.RoundingMode.HALF_UP).toPlainString() }
@@ -36,6 +38,7 @@ fun RefundScreen(
     modifier: Modifier = Modifier,
     state: RefundState,
 ) {
+    val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         state.load()
     }
@@ -106,7 +109,7 @@ fun RefundScreen(
                 )
                 Spacer(Modifier.height(16.dp))
                 Button(
-                    onClick = { state.queueRefund() },
+                    onClick = { scope.launch { state.queueRefund() } },
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -152,7 +155,7 @@ private fun SaleRow(sale: RefundableSale, onClick: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Column(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(fmt(sale.total), style = MaterialTheme.typography.titleMedium)
                 if (sale.mobileMoneyConfirmed) {
                     Text("mobile-money paid", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
