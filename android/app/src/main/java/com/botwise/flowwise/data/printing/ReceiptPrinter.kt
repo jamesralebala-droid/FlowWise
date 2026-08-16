@@ -41,7 +41,7 @@ private fun ByteArray.text(s: String): ByteArray {
         .replace('—', '-')
         .replace('·', '.')
         .replace('≈', '~')
-        .replace('…', "...")
+        .replace("…", "...")
         .replace('▾', '>')
     val bytes = sanitised.toByteArray(Charsets.ISO_8859_1)
     val out = ByteArray(size + bytes.size + 1)
