@@ -25,7 +25,23 @@ interface VariantDao {
 
     @Query("SELECT * FROM product_variants WHERE id = :id")
     suspend fun byId(id: String): VariantEntity?
+
+    /** Catalogue picker for GRN / count / transfer / adjustment lines. */
+    @Query(
+        """SELECT v.id AS id, v.sku AS sku, v.name AS variantName, p.name AS productName
+           FROM product_variants v JOIN products p ON p.id = v.productId
+           ORDER BY p.name, v.name""",
+    )
+    fun picker(): Flow<List<VariantPickerRow>>
 }
+
+/** A catalogue row as shown in a line-editor picker (variant + product name). */
+data class VariantPickerRow(
+    val id: String,
+    val sku: String?,
+    val variantName: String,
+    val productName: String,
+)
 
 @Dao
 interface BarcodeDao {
@@ -74,6 +90,9 @@ interface OutboxDao {
 
     @Query("UPDATE outbox_operations SET attempts = attempts + 1 WHERE id = :id")
     suspend fun bumpAttempts(id: Long)
+
+    @Query("SELECT COUNT(*) FROM outbox_operations WHERE status = 'pending'")
+    suspend fun pendingCount(): Int
 }
 
 @Dao

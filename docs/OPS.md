@@ -14,7 +14,8 @@ Run as the **migrator role** (`BYPASSRLS`), never as the API role:
 
 ```bash
 bun run migrate          # apply backend/migrations/*.sql (001..008)
-bun run seed:dev         # demo org + users + OAuth client (dev only)
+bun run seed:dev         # two-branch demo org: catalogue, suppliers, opening
+                         # stock, reorder rules, 6 users (dev only; idempotent)
 ```
 
 Then, on the database, ensure the API role has DML on every table — new

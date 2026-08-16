@@ -71,11 +71,18 @@ Against a real Postgres 15+ (as the migrator role, BYPASSRLS):
 
 ```bash
 bun run migrate      # apply backend/migrations/*.sql
-bun run seed:dev     # demo org + 4 users (Password123!) + OAuth client
+bun run seed:dev     # realistic multi-branch demo (idempotent)
 ```
 
-Demo logins: `owner@ / cashier@ / stock@ / auditor@flowwise.demo`
-(password `Password123!`). The Android app uses OAuth client `flowwise-app`.
+The demo seed builds a two-branch retail organisation (`botwise-demo`: MAIN +
+PHK, BWP / Africa/Gaborone / 14% VAT) with a ~16-item catalogue (barcodes,
+BWP prices, supplier mappings), ledger-backed opening balances, per-branch
+reorder rules — GRO-001 is deliberately below its reorder point on MAIN so
+the first reorder evaluation shows live suggestions — and six users
+(password `Password123!`): `owner@`, `manager@`, `cashier@` (MAIN),
+`cashier2@` (PHK), `stock@`, `auditor@flowwise.demo`. Re-running the seed is
+a no-op (verified by `test/seed.test.ts`). The Android app uses OAuth client
+`flowwise-app`.
 
 ### Environment variables
 

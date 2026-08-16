@@ -28,9 +28,12 @@ import com.botwise.flowwise.data.outbox.OutboxWorker
 import com.botwise.flowwise.data.pos.PosState
 import com.botwise.flowwise.data.sync.CatalogueSyncWorker
 import com.botwise.flowwise.ui.branches.BranchSelectScreen
+import com.botwise.flowwise.ui.home.HomeScreen
+import com.botwise.flowwise.ui.inventory.InventoryScreen
 import com.botwise.flowwise.ui.login.LoginScreen
 import com.botwise.flowwise.ui.pos.PosScreen
 import com.botwise.flowwise.ui.pos.ReceiptScreen
+import com.botwise.flowwise.ui.procurement.ProcurementScreen
 import com.botwise.flowwise.ui.scan.BarcodeScanScreen
 import com.botwise.flowwise.ui.theme.FlowWiseTheme
 import java.util.concurrent.TimeUnit
@@ -104,24 +107,33 @@ private fun schedulePeriodicOutboxFlush(context: Context) {
     )
 }
 
-private enum class PosRoute { CART, SCAN, RECEIPT }
+private enum class AppRoute { HOME, TILL_CART, TILL_SCAN, TILL_RECEIPT, INVENTORY, PROCUREMENT }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
     var loggedIn by remember { mutableStateOf(container.authManager.isLoggedIn) }
     var branchSelected by remember { mutableStateOf(container.authManager.selectedBranchId != null) }
-    var route by remember { mutableStateOf(PosRoute.CART) }
+    var route by remember { mutableStateOf(AppRoute.HOME) }
     val context = LocalContext.current
     val posState = remember {
         PosState(container.apiClient, container.authManager, container.outboxDao, container.shiftStore)
     }
+    val inventoryState = remember {
+        com.botwise.flowwise.data.inventory.InventoryState(container.apiClient, container.authManager, container.outboxDao)
+    }
+    val procurementState = remember {
+        com.botwise.flowwise.data.procurement.ProcurementState(container.apiClient, container.authManager)
+    }
 
     val title = when {
         !loggedIn || !branchSelected -> "FlowWise"
-        route == PosRoute.SCAN -> "Scan"
-        route == PosRoute.RECEIPT -> "Receipt"
-        else -> "FlowWise — Till"
+        route == AppRoute.TILL_SCAN -> "Scan"
+        route == AppRoute.TILL_RECEIPT -> "Receipt"
+        route == AppRoute.TILL_CART -> "Till"
+        route == AppRoute.INVENTORY -> "Stock"
+        route == AppRoute.PROCUREMENT -> "Procurement"
+        else -> "FlowWise"
     }
 
     Scaffold(
@@ -129,8 +141,14 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
             TopAppBar(
                 title = { Text(title) },
                 navigationIcon = {
-                    if (loggedIn && branchSelected && route != PosRoute.CART) {
-                        TextButton(onClick = { route = PosRoute.CART }) { Text("Back") }
+                    if (loggedIn && branchSelected && route != AppRoute.HOME) {
+                        val back = when (route) {
+                            AppRoute.TILL_SCAN, AppRoute.TILL_RECEIPT -> AppRoute.TILL_CART
+                            else -> AppRoute.HOME
+                        }
+                        TextButton(onClick = { route = back }) {
+                            Text(if (back == AppRoute.HOME) "Home" else "Back")
+                        }
                     }
                 },
             )
@@ -144,29 +162,53 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
                 // A shift remembered for another branch must not tag this till's sales.
                 if (posState.shift?.branchId != branchId) posState.clearShift()
                 branchSelected = true
-                route = PosRoute.CART
+                route = AppRoute.HOME
             }
-            route == PosRoute.SCAN -> BarcodeScanScreen(
+            route == AppRoute.HOME -> HomeScreen(
                 modifier = Modifier.padding(padding),
-                onResolved = { item ->
-                    if (posState.addItem(item)) route = PosRoute.CART
+                authManager = container.authManager,
+                onTill = { route = AppRoute.TILL_CART },
+                onStock = { route = AppRoute.INVENTORY },
+                onProcurement = { route = AppRoute.PROCUREMENT },
+                onSwitchBranch = { branchSelected = false },
+                onLogout = {
+                    container.authManager.logout()
+                    loggedIn = false
+                    branchSelected = false
+                    route = AppRoute.HOME
                 },
             )
-            route == PosRoute.RECEIPT && posState.receipt != null -> ReceiptScreen(
+            route == AppRoute.TILL_SCAN -> BarcodeScanScreen(
+                modifier = Modifier.padding(padding),
+                onResolved = { item ->
+                    if (posState.addItem(item)) route = AppRoute.TILL_CART
+                },
+            )
+            route == AppRoute.TILL_RECEIPT && posState.receipt != null -> ReceiptScreen(
                 modifier = Modifier.padding(padding),
                 receipt = posState.receipt!!,
                 onNewSale = {
                     posState.dismissReceipt()
-                    route = PosRoute.CART
+                    route = AppRoute.TILL_CART
                 },
+            )
+            route == AppRoute.INVENTORY -> InventoryScreen(
+                modifier = Modifier.padding(padding),
+                state = inventoryState,
+                variantDao = container.variantDao,
+                authManager = container.authManager,
+            )
+            route == AppRoute.PROCUREMENT -> ProcurementScreen(
+                modifier = Modifier.padding(padding),
+                state = procurementState,
             )
             else -> PosScreen(
                 modifier = Modifier.padding(padding),
                 state = posState,
-                onScan = { route = PosRoute.SCAN },
+                onScan = { route = AppRoute.TILL_SCAN },
                 onSaleCompleted = {
                     scheduleOutboxFlush(context)
-                    route = PosRoute.RECEIPT
+                    route = AppRoute.TILL_RECEIPT
                 },
             )
         }
