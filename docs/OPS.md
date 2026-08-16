@@ -1,11 +1,12 @@
-# FlowWise — Operations Runbook (Phase 4: Hardening & Rollout, Phase 6 ops)
+# FlowWise — Operations Runbook (Phase 4: Hardening & Rollout, Phase 6–7 ops)
 
 This document is the operating manual for the FlowWise backend. It covers the
 Phase 4 checklist: **load testing, security hardening, restore/device testing,
-data import, training, and the one-branch pilot** — plus the Phase 6
-operations for mobile-money webhooks and the web dashboard. The five
-invariants from the README are the ground rules for every procedure here —
-especially "never edit data to fix a problem".
+data import, training, and the one-branch pilot** — plus the Phase 6–7
+operations for mobile-money webhooks/payouts, FX rates, the supplier portal
+and the web dashboard. The five invariants from the README are the ground
+rules for every procedure here — especially "never edit data to fix a
+problem".
 
 ---
 
@@ -14,7 +15,7 @@ especially "never edit data to fix a problem".
 Run as the **migrator role** (`BYPASSRLS`), never as the API role:
 
 ```bash
-bun run migrate          # apply backend/migrations/*.sql (001..010)
+bun run migrate          # apply backend/migrations/*.sql (001..011)
 bun run seed:dev         # two-branch demo org: catalogue, suppliers, opening
                          # stock, reorder rules, 6 users (dev only; idempotent)
 ```
@@ -230,3 +231,30 @@ count, then fix discrepancies with a *count*, not an edit.
   them exactly. If balances ever look wrong, audit `loyalty_transactions`
   and `promotions.times_used` against the sales — never "adjust" a points
   balance directly.
+
+## 11. Phase 7 operations (payouts, FX, supplier portal, APKs)
+
+- **Payouts are refunds-to-wallet.** A refund of a mobile-money-paid sale
+  creates a `mobile_money_payouts` row in the refund transaction (status
+  `pending`); the provider `refund()` runs after commit and the gateway
+  confirms via the same signed webhook (payout events carry `payout` instead
+  of `payment` in the body) or the status pull (`GET /v1/mobile-money/payouts`).
+  A `failed` payout means the refund already happened on the ledger and the
+  till — re-initiate or settle manually. Never edit the payout row to "fix"
+  it; use the audit trail (`mobile_money.refund` / `mobile_money.refund_failed`).
+- **FX rates are money.** `rate_to_base` is base units per 1 foreign unit
+  (e.g. ZAR 0.74 → P0.74 buys R1). The base currency rate is pinned at 1.
+  Tenders snapshot the rate on the row, so a rate change never reprices a
+  historic receipt; reports/ledgers stay in base currency. Owner-only edits,
+  audited (`currency.update`).
+- **Supplier portal credentials.** Supplier logins are per-supplier
+  (`supplier_users`, one per supplier entity) and share the staff brute-force
+  throttle. Tokens are 24h (`SUPPLIER_TOKEN_TTL_SECONDS`) with no refresh —
+  re-login on expiry. Onboarding = create the `supplier_users` row with a
+  bcrypt hash (`bun run seed:dev` seeds one per demo supplier:
+  `<code>@flowwise.demo`). Suppliers can only see/edit their own data; the
+  `price-list` PUT is audited and feeds GRN/PO cost hints.
+- **APK distribution.** Debug APK is a CI artifact on every run (14 days);
+  release (minified, unsigned) via `workflow_dispatch` or a `v*` tag (30
+  days). Wire a signing config + keystore secrets into
+  `android/app/build.gradle.kts` before public distribution.

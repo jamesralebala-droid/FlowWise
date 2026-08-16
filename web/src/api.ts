@@ -220,3 +220,171 @@ export function timeAgo(iso: string): string {
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7: POS web client + supplier portal helpers
+// ---------------------------------------------------------------------------
+
+export interface PosProduct {
+  variantId: string;
+  productName: string;
+  variantName: string;
+  price: string;
+  sku: string | null;
+}
+
+export async function posCatalogue(): Promise<{ products: PosProduct[]; currency: string }> {
+  const res = await api<{
+    products: { id: string; name: string; sku: string | null }[];
+    variants: { id: string; productId: string; name: string; sku: string | null }[];
+    prices: { variantId: string; price: string }[];
+    currency: string;
+  }>("/catalogue");
+  const priceByVariant = new Map(res.prices.map((p) => [p.variantId, p.price]));
+  const products = res.variants
+    .map((v) => {
+      const product = res.products.find((p) => p.id === v.productId);
+      const price = priceByVariant.get(v.id);
+      if (!product || price === undefined) return null;
+      return {
+        variantId: v.id,
+        productName: product.name,
+        variantName: v.name,
+        price,
+        sku: v.sku ?? product.sku,
+      };
+    })
+    .filter((p): p is PosProduct => p !== null)
+    .sort((a, b) => a.productName.localeCompare(b.productName));
+  return { products, currency: res.currency };
+}
+
+export interface PosCurrency {
+  code: string;
+  name: string;
+  isBase: boolean;
+  rateToBase: string;
+}
+
+export async function listCurrencies(): Promise<PosCurrency[]> {
+  const res = await api<{ currencies: PosCurrency[] }>("/currencies");
+  return res.currencies;
+}
+
+export interface NewSaleInput {
+  branchId: string;
+  lines: { variantId: string; quantity: string }[];
+  tenders: { tenderType: string; amount: string; reference?: string; currency?: string }[];
+  customerId?: string;
+  promotionCode?: string;
+  loyaltyRedeem?: { points: number };
+  shiftId?: string;
+  notes?: string;
+}
+
+export async function completeSale(input: NewSaleInput): Promise<Record<string, unknown>> {
+  const clientOperationId = crypto.randomUUID();
+  return api<Record<string, unknown>>("/sales", {
+    method: "POST",
+    body: JSON.stringify({ ...input, clientOperationId }),
+  });
+}
+
+export async function refundSale(saleId: string, amount: string, clientOperationId?: string): Promise<Record<string, unknown>> {
+  return api<Record<string, unknown>>(`/sales/${saleId}/refund`, {
+    method: "POST",
+    body: JSON.stringify({ clientOperationId: clientOperationId ?? crypto.randomUUID(), amount }),
+  });
+}
+
+export async function getSale(saleId: string): Promise<Record<string, unknown>> {
+  return api<Record<string, unknown>>(`/sales/${saleId}`);
+}
+
+export async function recentSales(): Promise<Record<string, unknown>[]> {
+  const res = await api<{ sales: Record<string, unknown>[] }>("/sales?limit=25");
+  return res.sales;
+}
+
+export async function openShift(branchId: string, openingCash: string): Promise<Record<string, unknown>> {
+  return api<Record<string, unknown>>("/shifts", { method: "POST", body: JSON.stringify({ branchId, openingCash }) });
+}
+
+export async function closeShift(shiftId: string, declared: Record<string, string>): Promise<Record<string, unknown>> {
+  return api<Record<string, unknown>>(`/shifts/${shiftId}/close`, {
+    method: "POST",
+    body: JSON.stringify(declared),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Supplier self-service portal (Phase 7) — its own session, its own login.
+// ---------------------------------------------------------------------------
+
+export interface SupplierSession {
+  accessToken: string;
+  supplierId: string;
+  expiresAt: number;
+}
+
+const SUPPLIER_KEY = "flowwise.supplier";
+
+export function loadSupplierSession(): SupplierSession | null {
+  try {
+    const raw = sessionStorage.getItem(SUPPLIER_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as SupplierSession;
+    if (s.expiresAt < Date.now()) {
+      sessionStorage.removeItem(SUPPLIER_KEY);
+      return null;
+    }
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+export async function supplierLogin(email: string, password: string): Promise<SupplierSession> {
+  const res = await fetch(API_BASE + "/supplier-portal/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!res.ok) throw new ApiError(res.status, apiMessage(json, "Login failed — check your credentials"));
+  const session: SupplierSession = {
+    accessToken: String(json?.accessToken),
+    supplierId: String(json?.supplierId),
+    expiresAt: Date.now() + Number(json?.expiresIn ?? 86400) * 1000,
+  };
+  sessionStorage.setItem(SUPPLIER_KEY, JSON.stringify(session));
+  return session;
+}
+
+export function clearSupplierSession(): void {
+  sessionStorage.removeItem(SUPPLIER_KEY);
+}
+
+export async function supplierApi<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
+  const session = loadSupplierSession();
+  if (!session) throw new ApiError(401, "Not signed in");
+  const res = await fetch(API_BASE + "/supplier-portal" + path, {
+    ...init,
+    headers: {
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      Authorization: `Bearer ${session.accessToken}`,
+      ...(init.headers ?? {}),
+    },
+  });
+  if (res.status === 401) {
+    clearSupplierSession();
+    window.location.href = "/supplier/login";
+    throw new ApiError(401, "Session expired — sign in again");
+  }
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { message?: string } | null;
+    throw new ApiError(res.status, body?.message ?? `Request failed (${res.status})`);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}

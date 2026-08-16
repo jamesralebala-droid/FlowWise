@@ -24,6 +24,8 @@ export interface Env {
   dodoApiKey?: string;
   /** Dodo webhook secret used to verify /v1/mobile-money/webhook signatures. */
   dodoWebhookSecret?: string;
+  /** Supplier-portal access-token lifetime (Phase 7). */
+  supplierTokenTtlSeconds: number;
 }
 
 export function loadEnv(): Env {
@@ -51,6 +53,7 @@ export function loadEnv(): Env {
     mobileMoneyProvider: process.env.MOBILE_MONEY_PROVIDER === "dodo" ? "dodo" : "mock",
     dodoApiKey: process.env.DODO_API_KEY || undefined,
     dodoWebhookSecret: process.env.DODO_WEBHOOK_SECRET || undefined,
+    supplierTokenTtlSeconds: Number(process.env.SUPPLIER_TOKEN_TTL_SECONDS ?? 86400),
   };
 }
 

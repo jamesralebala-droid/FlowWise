@@ -13,6 +13,10 @@ export interface JwtPayloadClaims {
   roles: RoleClaim[];
   /** bound device id, if any */
   dev: string | null;
+  /** Phase 7: principal kind — 'supplier' for the self-service portal. */
+  kind?: "user" | "supplier";
+  /** Phase 7: the supplier entity a supplier token is scoped to. */
+  supplierId?: string;
   iss: string;
   aud: string;
   iat: number;
@@ -34,12 +38,16 @@ export class JwtService {
     perms: string[];
     roles: RoleClaim[];
     dev: string | null;
+    kind?: "user" | "supplier";
+    supplierId?: string;
   }): Promise<{ token: string; expiresIn: number }> {
     const token = await new SignJWT({
       org: input.org,
       perms: input.perms,
       roles: input.roles,
       dev: input.dev,
+      ...(input.kind ? { kind: input.kind } : {}),
+      ...(input.supplierId ? { supplierId: input.supplierId } : {}),
     })
       .setProtectedHeader({ alg: "HS256" })
       .setSubject(input.sub)

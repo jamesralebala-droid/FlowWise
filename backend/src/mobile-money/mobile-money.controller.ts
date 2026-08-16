@@ -24,6 +24,20 @@ export class MobileMoneyController {
     });
   }
 
+  /** Phase 7: back-office pull of payout (refund-to-wallet) statuses. */
+  @Get("payouts")
+  @Permissions("payment.read")
+  async listPayouts(
+    @Req() req: AuthedRequest,
+    @Query() q: { branchId?: string; status?: string; limit?: string },
+  ) {
+    return this.mobileMoney.listPayouts(req.claims, {
+      branchId: q.branchId,
+      status: q.status,
+      limit: q.limit ? Number(q.limit) : undefined,
+    });
+  }
+
   /**
    * Provider callback. HMAC-verified against DODO_WEBHOOK_SECRET over the raw
    * body (signature header `x-dodo-signature`). Without a configured secret

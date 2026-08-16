@@ -4,7 +4,7 @@ import type { Db, DbExecutor } from "../db/db.js";
 import { AuditService } from "../auth/audit.service.js";
 import { env } from "../env.js";
 import type { JwtPayloadClaims } from "../auth/jwt.service.js";
-import { MobileMoneyService, createMobileMoneyPayment } from "../mobile-money/mobile-money.service.js";
+import { MobileMoneyService, createMobileMoneyPayment, createMobileMoneyPayout } from "../mobile-money/mobile-money.service.js";
 
 const DECIMAL_RE = /^\d{1,12}(\.\d{1,4})?$/;
 const TENDER_TYPES = new Set(["cash", "card", "mobile_money", "credit", "other"]);
@@ -31,9 +31,11 @@ interface AllocationRow {
 
 export interface SaleTenderInput {
   tenderType: string;
-  /** decimal STRING */
+  /** decimal STRING — in the tender's currency (defaults to the org base). */
   amount: string;
   reference?: string;
+  /** Phase 7: ISO 4217 code; omitted → base currency. cash/card/other only. */
+  currency?: string;
 }
 
 export interface CreateSaleInput {
@@ -140,7 +142,7 @@ export class SalesService {
     input: CreateSaleInput,
   ): Promise<unknown> {
     const org = await tx.query(
-      `SELECT vat_rate,
+      `SELECT vat_rate, currency_code AS "baseCurrency",
               loyalty_earn_points_per_bwp AS "loyaltyEarnRate",
               loyalty_redeem_bwp_per_point AS "loyaltyRedeemValue"
        FROM organisations WHERE id = $1`,
@@ -148,6 +150,34 @@ export class SalesService {
     );
     if (org.rows.length === 0) throw new NotFoundException("Organisation not found");
     const taxRate = org.rows[0].vat_rate as string;
+    // Phase 7 multi-currency: resolve the FX map (base is always 1).
+    const baseCurrency = String(org.rows[0].baseCurrency ?? "BWP").trim();
+    const fxRows = await tx.query(
+      "SELECT code, rate_to_base AS \"rateToBase\" FROM currencies WHERE org_id = $1",
+      [claims.org],
+    );
+    const fx = new Map<string, string>();
+    for (const r of fxRows.rows) fx.set(String(r.code).trim(), String(r.rateToBase));
+    if (!fx.has(baseCurrency)) fx.set(baseCurrency, "1");
+    const normalizeTender = (t: SaleTenderInput): { tenderType: string; amountBase: string; amountFx: string; fxRate: string; currency: string; reference?: string } => {
+      const currency = (t.currency ?? baseCurrency).trim().toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) throw new BadRequestException(`tender currency ${currency} is invalid`);
+      const rate = fx.get(currency);
+      if (!rate) throw new BadRequestException(`Unknown tender currency ${currency} — add it in settings first`);
+      if (currency !== baseCurrency && (t.tenderType === "mobile_money" || t.tenderType === "credit")) {
+        throw new BadRequestException(`${t.tenderType} tender must be in the base currency (${baseCurrency})`);
+      }
+      const amountBase = currency === baseCurrency ? t.amount : round4(Number(t.amount) * Number(rate)).toFixed(4);
+      return {
+        tenderType: t.tenderType,
+        amountBase,
+        amountFx: t.amount,
+        fxRate: rate,
+        currency,
+        reference: t.reference,
+      };
+    };
+    const normalizedTenders = (input.tenders ?? []).map(normalizeTender);
 
     const branch = await tx.query(
       "SELECT id FROM branches WHERE id = $1 AND org_id = $2 AND is_active",
@@ -200,9 +230,9 @@ export class SalesService {
 
     const tenderValues: string[] = [];
     const tenderParams: unknown[] = [];
-    for (const t of input.tenders ?? []) {
+    for (const t of normalizedTenders) {
       tenderValues.push(`($${tenderParams.length + 1}::numeric(14,4))`);
-      tenderParams.push(t.amount);
+      tenderParams.push(t.amountBase);
     }
     const tenderedRow = await tx.query(
       `SELECT COALESCE(SUM(amount), 0)::numeric(14,4) AS tendered
@@ -287,14 +317,14 @@ export class SalesService {
 
     // Phase 5 credit: the credit tender portion becomes a receivable on the
     // customer's account IN THE SAME TRANSACTION as the sale (Invariant 3).
-    const creditTenders = (input.tenders ?? []).filter((t) => t.tenderType === "credit");
+    const creditTenders = normalizedTenders.filter((t) => t.tenderType === "credit");
     let creditPortion = "0.0000";
     if (creditTenders.length > 0) {
       if (!customerId) throw new BadRequestException("customerId is required for credit sales");
       const creditSum = await tx.query(
         `SELECT COALESCE(SUM(amount), 0)::numeric(14,4) AS credit
          FROM (VALUES ${creditTenders.map((_, i) => `($${i + 1}::numeric(14,4))`).join(", ")}) AS t(amount)`,
-        creditTenders.map((t) => t.amount),
+        creditTenders.map((t) => t.amountBase),
       );
       creditPortion = creditSum.rows[0].credit as string;
 
@@ -420,7 +450,7 @@ export class SalesService {
     }
 
     // Mobile money tender → pending payment row IN this transaction (Invariant 3).
-    for (const t of input.tenders ?? []) {
+    for (const t of normalizedTenders) {
       if (t.tenderType !== "mobile_money") continue;
       await createMobileMoneyPayment(
         tx,
@@ -429,7 +459,7 @@ export class SalesService {
         saleId,
         env.mobileMoneyProvider,
         t.reference!.trim(),
-        t.amount,
+        t.amountBase,
         input.clientOperationId,
       );
     }
@@ -456,11 +486,11 @@ export class SalesService {
       lineBatchParams,
     );
 
-    for (const [i, t] of (input.tenders ?? []).entries()) {
+    for (const [i, t] of normalizedTenders.entries()) {
       await tx.query(
-        `INSERT INTO sale_tenders (org_id, sale_id, tender_type, amount, reference)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [claims.org, saleId, t.tenderType, t.amount, t.reference ?? null],
+        `INSERT INTO sale_tenders (org_id, sale_id, tender_type, amount, reference, tender_currency, fx_rate, amount_fx)
+         VALUES ($1, $2, $3, $4::numeric(14,4), $5, $6, $7::numeric(14,8), $8::numeric(14,4))`,
+        [claims.org, saleId, t.tenderType, t.amountBase, t.reference ?? null, t.currency, t.fxRate, t.amountFx],
       );
     }
 
@@ -578,7 +608,8 @@ export class SalesService {
     const opId = input.clientOperationId?.trim();
     if (!opId) throw new BadRequestException("clientOperationId is required");
 
-    return this.db.withContext(
+    let payoutInfo: { phone: string; amount: string; providerReference: string | null } | null = null;
+    const result = await this.db.withContext(
       { orgId: claims.org, userId: claims.sub, deviceId: claims.dev },
       async (tx) => {
         const existing = await tx.query(
@@ -677,11 +708,54 @@ export class SalesService {
           [claims.org, sale.rows[0].branch_id as string, input.saleId, opId, claims.sub, claims.dev ?? null],
         );
 
+        // Phase 7: a refund of a mobile-money-paid sale pays the customer back
+        // to their wallet. The payout row is created IN this transaction
+        // (Invariant 3); the provider refund() runs after commit.
+        if (Number(amount) > 0) {
+          const mobile = await tx.query(
+            `SELECT id, provider, phone, amount, provider_reference AS "providerReference"
+             FROM mobile_money_payments
+             WHERE sale_id = $1 AND org_id = $2 AND status = 'confirmed'`,
+            [input.saleId, claims.org],
+          );
+          if (mobile.rows.length > 0) {
+            const m = mobile.rows[0];
+            const payoutAmount = fmt(Math.min(Number(amount), Number(m.amount)));
+            await createMobileMoneyPayout(
+              tx,
+              claims.org,
+              sale.rows[0].branch_id as string,
+              m.id as string,
+              input.saleId,
+              refundId,
+              m.provider as string,
+              m.phone as string,
+              payoutAmount,
+              opId,
+            );
+            payoutInfo = {
+              phone: m.phone as string,
+              amount: payoutAmount,
+              providerReference: (m.providerReference as string | null) ?? null,
+            };
+          }
+        }
+
         await this.audit.write(tx, "sale.refund", "sale", input.saleId, null, JSON.stringify({ refundId, amount }));
 
         return { refundId, amount, saleId: input.saleId };
       },
     );
+
+    // Mobile-money refund: drive the provider AFTER the refund transaction
+    // commits (never a network call inside the transaction). A provider
+    // failure marks the payout 'failed' — the refund itself already stands.
+    if (payoutInfo && !(result as { replay?: boolean }).replay) {
+      const { phone, amount, providerReference } = payoutInfo;
+      await this.mobileMoney.refundForSale(claims, (result as { refundId: string }).refundId, input.saleId, phone, amount, providerReference);
+      return { ...result, payout: { phone, amount } };
+    }
+    return result;
   }
 
   // -- read ----------------------------------------------------------------------
@@ -752,7 +826,8 @@ export class SalesService {
       [saleId, orgId],
     );
     const tenders = await tx.query(
-      `SELECT id, tender_type AS "tenderType", amount, reference
+      `SELECT id, tender_type AS "tenderType", amount, reference,
+              tender_currency AS "tenderCurrency", fx_rate AS "fxRate", amount_fx AS "amountFx"
        FROM sale_tenders WHERE sale_id = $1 AND org_id = $2 ORDER BY id`,
       [saleId, orgId],
     );
@@ -762,6 +837,12 @@ export class SalesService {
        FROM mobile_money_payments WHERE sale_id = $1 AND org_id = $2 ORDER BY created_at`,
       [saleId, orgId],
     );
-    return { ...sale.rows[0], lines: lines.rows, tenders: tenders.rows, payments: payments.rows };
+    const payouts = await tx.query(
+      `SELECT id, provider, phone, amount, status, provider_reference AS "providerReference",
+              provider_status AS "providerStatus", error, confirmed_at AS "confirmedAt", created_at AS "createdAt"
+       FROM mobile_money_payouts WHERE sale_id = $1 AND org_id = $2 ORDER BY created_at`,
+      [saleId, orgId],
+    );
+    return { ...sale.rows[0], lines: lines.rows, tenders: tenders.rows, payments: payments.rows, payouts: payouts.rows };
   }
 }
