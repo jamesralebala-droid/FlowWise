@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import net.zetetic.database.sqlcipher.SQLiteConnection
+import net.zetetic.database.sqlcipher.SQLiteDatabaseHook
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 @Database(
@@ -41,13 +43,19 @@ abstract class AppDatabase : RoomDatabase() {
 
         fun build(context: Context): AppDatabase {
             val passphrase = databaseKey(context)
-            val factory = SupportOpenHelperFactory(
-                passphrase,
-                net.zetetic.database.sqlcipher.SQLiteDatabaseHook { db ->
-                    db.execSQL("PRAGMA cipher_migrate")
-                },
-                net.zetetic.database.sqlcipher.SQLiteDatabaseHook {},
-            )
+            // SQLiteDatabaseHook is a two-method interface — no SAM conversion.
+            // cipher_migrate must run AFTER the key is applied (postKey).
+            val migrate = object : SQLiteDatabaseHook {
+                override fun preKey(connection: SQLiteConnection) {}
+                override fun postKey(connection: SQLiteConnection) {
+                    connection.execSQL("PRAGMA cipher_migrate")
+                }
+            }
+            val noop = object : SQLiteDatabaseHook {
+                override fun preKey(connection: SQLiteConnection) {}
+                override fun postKey(connection: SQLiteConnection) {}
+            }
+            val factory = SupportOpenHelperFactory(passphrase, migrate, noop)
             return Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, DB_NAME)
                 .openHelperFactory(factory)
                 .build()
