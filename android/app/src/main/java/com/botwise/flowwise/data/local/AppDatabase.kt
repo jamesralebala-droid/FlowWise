@@ -48,14 +48,11 @@ abstract class AppDatabase : RoomDatabase() {
             val migrate = object : SQLiteDatabaseHook {
                 override fun preKey(connection: SQLiteConnection) {}
                 override fun postKey(connection: SQLiteConnection) {
-                    connection.execSQL("PRAGMA cipher_migrate")
+                    // sqlcipher 4.x SQLiteConnection has execute(), not execSQL().
+                    connection.execute("PRAGMA cipher_migrate", null, null)
                 }
             }
-            val noop = object : SQLiteDatabaseHook {
-                override fun preKey(connection: SQLiteConnection) {}
-                override fun postKey(connection: SQLiteConnection) {}
-            }
-            val factory = SupportOpenHelperFactory(passphrase, migrate, noop)
+            val factory = SupportOpenHelperFactory(passphrase, migrate, false)
             return Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, DB_NAME)
                 .openHelperFactory(factory)
                 .build()

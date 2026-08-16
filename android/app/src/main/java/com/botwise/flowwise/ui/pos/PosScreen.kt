@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -425,7 +426,7 @@ private fun TenderField(label: String, value: String, onValueChange: (String) ->
 }
 
 @Composable
-private fun QuickTenderButton(label: String, onClick: () -> Unit) {
+private fun RowScope.QuickTenderButton(label: String, onClick: () -> Unit) {
     OutlinedButton(onClick = onClick, modifier = Modifier.weight(1f)) {
         Text(label)
     }
