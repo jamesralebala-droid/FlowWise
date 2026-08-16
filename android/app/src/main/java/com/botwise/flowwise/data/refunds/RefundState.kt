@@ -97,11 +97,11 @@ class RefundState(
         message = null
     }
 
-    fun setAmount(v: String) {
+    fun updateAmount(v: String) {
         amount = v
     }
 
-    fun setReason(v: String) {
+    fun updateReason(v: String) {
         reason = v
     }
 

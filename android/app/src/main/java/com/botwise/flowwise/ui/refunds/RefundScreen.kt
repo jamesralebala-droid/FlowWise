@@ -94,7 +94,7 @@ fun RefundScreen(
             if (state.queuedOpId == null) {
                 OutlinedTextField(
                     value = state.amount,
-                    onValueChange = state::setAmount,
+                    onValueChange = state::updateAmount,
                     label = { Text("Refund amount (P)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -102,7 +102,7 @@ fun RefundScreen(
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = state.reason,
-                    onValueChange = state::setReason,
+                    onValueChange = state::updateReason,
                     label = { Text("Reason (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
