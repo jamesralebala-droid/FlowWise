@@ -58,6 +58,10 @@ fun PosScreen(
     var cardTender by remember { mutableStateOf("0") }
     var mobileTender by remember { mutableStateOf("0") }
     var creditTender by remember { mutableStateOf("0") }
+    var mobilePhone by remember { mutableStateOf("") }
+    var promoCode by remember { mutableStateOf("") }
+    var useLoyalty by remember { mutableStateOf(false) }
+    var loyaltyPoints by remember { mutableStateOf("") }
     var emailTo by remember { mutableStateOf("") }
     var declaredCash by remember { mutableStateOf("0") }
     var declaredCard by remember { mutableStateOf("0") }
@@ -73,7 +77,12 @@ fun PosScreen(
     val change = tendered.subtract(state.total)
     val short = change < BigDecimal.ZERO
     val creditNeedsCustomer = credit > BigDecimal.ZERO && state.creditCustomerId == null
-    val canComplete = state.items.isNotEmpty() && !state.busy && tendered > BigDecimal.ZERO && !short && !creditNeedsCustomer
+    val loyaltyNeedsCustomer = useLoyalty && (loyaltyPoints.toIntOrNull() ?: 0) > 0 && state.creditCustomerId == null
+    val selectedCustomer = state.customers.firstOrNull { it.optString("id") == state.creditCustomerId }
+    val loyaltyAvailable = selectedCustomer?.optInt("loyaltyPoints", 0) ?: 0
+    val canComplete = state.items.isNotEmpty() && !state.busy && tendered > BigDecimal.ZERO && !short &&
+        !creditNeedsCustomer && !loyaltyNeedsCustomer &&
+        !(mobile > BigDecimal.ZERO && mobilePhone.isBlank())
 
     LaunchedEffect(Unit) { state.loadCustomers() }
 
@@ -142,7 +151,71 @@ fun PosScreen(
         TenderRow("Card", cardTender, { cardTender = it })
         TenderRow("Mobile money", mobileTender, { mobileTender = it })
         TenderRow("Credit", creditTender, { creditTender = it })
-        if (credit > BigDecimal.ZERO) {
+        if (mobile > BigDecimal.ZERO) {
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = mobilePhone,
+                onValueChange = { mobilePhone = it },
+                label = { Text("Customer's mobile number (mobile money)") },
+                singleLine = true,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Phone),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        // Phase 6: promotion code + loyalty redemption (both validated
+        // server-side; the server's numbers are the authoritative ones).
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = promoCode,
+                onValueChange = { promoCode = it.uppercase() },
+                label = { Text("Promo code") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = { promoCode = "" },
+                enabled = promoCode.isNotEmpty(),
+            ) { Text("Clear") }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Use loyalty points", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            androidx.compose.material3.Switch(checked = useLoyalty, onCheckedChange = { useLoyalty = it })
+        }
+        if (useLoyalty) {
+            Spacer(Modifier.height(6.dp))
+            CustomerPickerRow(state, onPick = { showCustomerPicker = true })
+            if (loyaltyNeedsCustomer) {
+                Text(
+                    "Select a customer account to redeem points",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            if (selectedCustomer != null) {
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = loyaltyPoints,
+                    onValueChange = { input ->
+                        if (input.length <= 6 && input.all { it.isDigit() }) loyaltyPoints = input
+                    },
+                    label = { Text("Points to redeem (balance: $loyaltyAvailable)") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                val points = loyaltyPoints.toIntOrNull() ?: 0
+                if (points > 0) {
+                    Text(
+                        "≈ ${formatMoney(BigDecimal(points).multiply(BigDecimal("0.10")))} off — server confirms the exact balance",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if (credit > BigDecimal.ZERO && !useLoyalty) {
             Spacer(Modifier.height(6.dp))
             CustomerPickerRow(state, onPick = { showCustomerPicker = true })
             if (creditNeedsCustomer) {
@@ -184,11 +257,13 @@ fun PosScreen(
                         listOf(
                             TenderEntry("cash", cashTender),
                             TenderEntry("card", cardTender),
-                            TenderEntry("mobileMoney", mobileTender),
+                            TenderEntry("mobileMoney", mobileTender, mobilePhone.trim().ifBlank { null }),
                             TenderEntry("credit", creditTender),
                         ),
-                        customerId = if (credit > BigDecimal.ZERO) state.creditCustomerId else null,
+                        customerId = if (credit > BigDecimal.ZERO || useLoyalty) state.creditCustomerId else null,
                         emailTo = emailTo,
+                        promotionCode = promoCode.ifBlank { null },
+                        loyaltyPoints = loyaltyPoints.toIntOrNull()?.takeIf { it > 0 },
                     )
                     if (state.receipt != null) onSaleCompleted()
                 }

@@ -40,6 +40,15 @@ import { WebhooksController } from "./procurement/webhooks.controller.js";
 import { WebhooksService } from "./procurement/webhooks.service.js";
 import { CustomersController } from "./customers/customers.controller.js";
 import { CustomersService } from "./customers/customers.service.js";
+import { PromotionsController } from "./promotions/promotions.controller.js";
+import { PromotionsService } from "./promotions/promotions.service.js";
+import { MobileMoneyController } from "./mobile-money/mobile-money.controller.js";
+import {
+  DodoMobileMoneyProvider,
+  MOBILE_MONEY_PROVIDER,
+  MockMobileMoneyProvider,
+  MobileMoneyService,
+} from "./mobile-money/mobile-money.service.js";
 import { ReceiptsController } from "./receipts/receipts.controller.js";
 import { ReceiptsService, RECEIPT_SENDER, ResendSender } from "./receipts/receipts.service.js";
 import { SalesController } from "./sales/sales.controller.js";
@@ -70,6 +79,8 @@ import { ShiftsService } from "./shifts/shifts.service.js";
     AuditController,
     CustomersController,
     ReceiptsController,
+    PromotionsController,
+    MobileMoneyController,
     HealthController,
   ],
   providers: [
@@ -101,7 +112,16 @@ import { ShiftsService } from "./shifts/shifts.service.js";
     WebhooksService,
     CustomersService,
     ReceiptsService,
+    PromotionsService,
+    MobileMoneyService,
     { provide: RECEIPT_SENDER, useFactory: () => (env.resendApiKey ? new ResendSender(env.resendApiKey) : null) },
+    {
+      provide: MOBILE_MONEY_PROVIDER,
+      useFactory: () =>
+        env.mobileMoneyProvider === "dodo" && env.dodoApiKey
+          ? new DodoMobileMoneyProvider(env.dodoApiKey)
+          : new MockMobileMoneyProvider(),
+    },
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
     { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },

@@ -49,6 +49,8 @@ data class ReceiptData(
 data class TenderEntry(
     val type: String,
     val amount: String,
+    /** Phase 6: mobile-money tenders carry the customer's phone number. */
+    val reference: String? = null,
 )
 
 private val TENDER_LABELS = mapOf(
@@ -193,8 +195,18 @@ class PosState(
      * Tenders are (tenderType, decimal-string amount) pairs — cash, card,
      * mobile money etc. — and the change due is only what the tender sum
      * exceeds the total by. Tenders and totals stay decimal strings end to end.
+     *
+     * Phase 6: promotionCode (validated server-side, usage counted in the same
+     * transaction) and loyaltyPoints (customer balance checked server-side,
+     * append-only earn/redeem rows). The SERVER is authoritative for both.
      */
-    suspend fun completeSale(tendersInput: List<TenderEntry>, customerId: String? = null, emailTo: String? = null) {
+    suspend fun completeSale(
+        tendersInput: List<TenderEntry>,
+        customerId: String? = null,
+        emailTo: String? = null,
+        promotionCode: String? = null,
+        loyaltyPoints: Int? = null,
+    ) {
         if (items.isEmpty()) {
             error = "Cart is empty"
             return
@@ -209,8 +221,18 @@ class PosState(
             return
         }
         val hasCredit = tenders.any { it.type == "credit" }
-        if (hasCredit && customerId.isNullOrBlank()) {
-            error = "Select a customer account for the credit portion"
+        val wantsLoyalty = (loyaltyPoints ?: 0) > 0
+        if ((hasCredit || wantsLoyalty) && customerId.isNullOrBlank()) {
+            error = "Select a customer account"
+            return
+        }
+        if (wantsLoyalty && (loyaltyPoints ?: 0) > 1_000_000) {
+            error = "Points amount is too large"
+            return
+        }
+        val mobilePhone = tenders.firstOrNull { it.type == "mobileMoney" }?.reference?.trim()
+        if (tenders.any { it.type == "mobileMoney" } && mobilePhone.isNullOrBlank()) {
+            error = "Enter the customer's mobile number for the mobile-money payment"
             return
         }
         val totalTendered = tenders.fold(BigDecimal.ZERO) { acc, t -> acc.add(BigDecimal(t.amount)) }
@@ -236,13 +258,19 @@ class PosState(
         }
         val tendersJson = JSONArray()
         for (t in tenders) {
-            tendersJson.put(JSONObject().put("tenderType", t.type).put("amount", t.amount))
+            val tender = JSONObject().put("tenderType", t.type).put("amount", t.amount)
+            if (t.reference?.isNotBlank() == true) tender.put("reference", t.reference)
+            tendersJson.put(tender)
         }
         val payload = JSONObject()
             .put("branchId", branchId)
             .put("lines", lines)
             .put("tenders", tendersJson)
-        if (customerId != null && hasCredit) payload.put("customerId", customerId)
+        if (customerId != null) payload.put("customerId", customerId)
+        val code = promotionCode?.trim().orEmpty()
+        if (code.isNotEmpty()) payload.put("promotionCode", code)
+        val points = loyaltyPoints ?: 0
+        if (points > 0) payload.put("loyaltyRedeem", JSONObject().put("points", points))
         shift?.let { payload.put("shiftId", it.id) }
 
         // Sale first, then (optional) eReceipt op — the outbox flushes in

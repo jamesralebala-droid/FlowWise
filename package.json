@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "backend"
+    "backend",
+    "web"
   ],
   "scripts": {
     "dev": "cd backend && bun run dev",

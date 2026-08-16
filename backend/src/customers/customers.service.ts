@@ -75,9 +75,11 @@ export class CustomersService {
         const r = await tx.query(
           `SELECT c.id, c.name, c.phone, c.email, c.credit_limit AS "creditLimit",
                   c.is_active AS "isActive", c.created_at AS "createdAt",
-                  COALESCE(b.balance, 0)::numeric(14,4) AS balance
+                  COALESCE(b.balance, 0)::numeric(14,4) AS balance,
+                  COALESCE(l.points, 0)::int AS "loyaltyPoints"
            FROM customers c
            LEFT JOIN v_customer_balances b ON b.customer_id = c.id AND b.org_id = c.org_id
+           LEFT JOIN v_customer_loyalty l ON l.customer_id = c.id AND l.org_id = c.org_id
            WHERE ${where}
            ORDER BY c.name
            LIMIT 200`,
@@ -95,9 +97,11 @@ export class CustomersService {
         const c = await tx.query(
           `SELECT c.id, c.name, c.phone, c.email, c.credit_limit AS "creditLimit",
                   c.is_active AS "isActive", c.created_at AS "createdAt",
-                  COALESCE(b.balance, 0)::numeric(14,4) AS balance
+                  COALESCE(b.balance, 0)::numeric(14,4) AS balance,
+                  COALESCE(l.points, 0)::int AS "loyaltyPoints"
            FROM customers c
            LEFT JOIN v_customer_balances b ON b.customer_id = c.id AND b.org_id = c.org_id
+           LEFT JOIN v_customer_loyalty l ON l.customer_id = c.id AND l.org_id = c.org_id
            WHERE c.id = $1 AND c.org_id = $2`,
           [customerId, claims.org],
         );
@@ -193,9 +197,11 @@ export class CustomersService {
         const customer = await tx.query(
           `SELECT c.id, c.name, c.phone, c.email, c.credit_limit AS "creditLimit",
                   c.is_active AS "isActive", c.created_at AS "createdAt",
-                  COALESCE(b.balance, 0)::numeric(14,4) AS balance
+                  COALESCE(b.balance, 0)::numeric(14,4) AS balance,
+                  COALESCE(l.points, 0)::int AS "loyaltyPoints"
            FROM customers c
            LEFT JOIN v_customer_balances b ON b.customer_id = c.id AND b.org_id = c.org_id
+           LEFT JOIN v_customer_loyalty l ON l.customer_id = c.id AND l.org_id = c.org_id
            WHERE c.id = $1 AND c.org_id = $2`,
           [customerId, claims.org],
         );
