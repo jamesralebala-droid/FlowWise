@@ -11,6 +11,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +25,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.botwise.flowwise.data.outbox.OutboxState
 import com.botwise.flowwise.data.outbox.OutboxWorker
 import com.botwise.flowwise.data.pos.PosState
 import com.botwise.flowwise.data.sync.CatalogueSyncWorker
@@ -34,6 +36,7 @@ import com.botwise.flowwise.ui.login.LoginScreen
 import com.botwise.flowwise.ui.pos.PosScreen
 import com.botwise.flowwise.ui.pos.ReceiptScreen
 import com.botwise.flowwise.ui.procurement.ProcurementScreen
+import com.botwise.flowwise.ui.queue.OutboxScreen
 import com.botwise.flowwise.ui.scan.BarcodeScanScreen
 import com.botwise.flowwise.ui.theme.FlowWiseTheme
 import java.util.concurrent.TimeUnit
@@ -107,7 +110,7 @@ private fun schedulePeriodicOutboxFlush(context: Context) {
     )
 }
 
-private enum class AppRoute { HOME, TILL_CART, TILL_SCAN, TILL_RECEIPT, INVENTORY, PROCUREMENT }
+private enum class AppRoute { HOME, TILL_CART, TILL_SCAN, TILL_RECEIPT, INVENTORY, PROCUREMENT, QUEUE }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -125,6 +128,13 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
     val procurementState = remember {
         com.botwise.flowwise.data.procurement.ProcurementState(container.apiClient, container.authManager)
     }
+    val outboxState = remember {
+        OutboxState(container.apiClient, container.authManager, container.outboxDao)
+    }
+    var pendingOps by remember { mutableStateOf(0) }
+    LaunchedEffect(route, loggedIn, branchSelected) {
+        pendingOps = container.outboxDao.pendingCount()
+    }
 
     val title = when {
         !loggedIn || !branchSelected -> "FlowWise"
@@ -133,6 +143,7 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
         route == AppRoute.TILL_CART -> "Till"
         route == AppRoute.INVENTORY -> "Stock"
         route == AppRoute.PROCUREMENT -> "Procurement"
+        route == AppRoute.QUEUE -> "Sync queue"
         else -> "FlowWise"
     }
 
@@ -167,9 +178,11 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
             route == AppRoute.HOME -> HomeScreen(
                 modifier = Modifier.padding(padding),
                 authManager = container.authManager,
+                pendingOps = pendingOps,
                 onTill = { route = AppRoute.TILL_CART },
                 onStock = { route = AppRoute.INVENTORY },
                 onProcurement = { route = AppRoute.PROCUREMENT },
+                onQueue = { route = AppRoute.QUEUE },
                 onSwitchBranch = { branchSelected = false },
                 onLogout = {
                     container.authManager.logout()
@@ -202,9 +215,16 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
                 modifier = Modifier.padding(padding),
                 state = procurementState,
             )
+            route == AppRoute.QUEUE -> OutboxScreen(
+                modifier = Modifier.padding(padding),
+                state = outboxState,
+                onDone = { route = AppRoute.HOME },
+            )
             else -> PosScreen(
                 modifier = Modifier.padding(padding),
                 state = posState,
+                pendingOps = pendingOps,
+                onOpenQueue = { route = AppRoute.QUEUE },
                 onScan = { route = AppRoute.TILL_SCAN },
                 onSaleCompleted = {
                     scheduleOutboxFlush(context)

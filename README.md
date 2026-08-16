@@ -5,6 +5,8 @@ Botswana SMEs — a **BotWise Technologies** product (sister to RunWise). The
 till keeps selling with zero network for days; when connectivity returns,
 everything reconciles exactly, replay-safe, against a single source of truth.
 
+[![CI](https://github.com/jamesralebala-droid/FlowWise/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesralebala-droid/FlowWise/actions/workflows/ci.yml)
+
 > **Status: Phase 0 (Foundation) ✅ + Phase 1 (POS core) ✅ + Phase 2
 > (Inventory ops) ✅ + Phase 3 (Procurement & intelligence) ✅ + Phase 4
 > (Hardening & rollout) ✅ — implemented & test-verified in this repo.**
@@ -236,6 +238,13 @@ store), `outbox_operations` + `sync_cursors`, WorkManager catalogue sync,
 ML Kit + CameraX barcode scanning. Open in Android Studio and run
 `./gradlew :app:assembleDebug`; set the API base URL via
 `buildConfigField` (default `http://10.0.2.2:4000/v1` for the emulator).
+
+Screens: Login → Branch select → Home (Till / Stock / Procurement / Sync
+queue). The till takes cash, card and mobile-money tenders with quick
+amounts and live change; sales, GRNs, transfers and adjustments are saved to
+the local outbox first and pushed via `POST /v1/outbox` by a WorkManager
+worker (auto) or the Sync queue screen (manual "Sync now") — same shared
+flush path, replay-safe via `client_operation_id`.
 
 ## Roadmap
 

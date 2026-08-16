@@ -31,9 +31,11 @@ import com.botwise.flowwise.data.auth.AuthManager
 fun HomeScreen(
     modifier: Modifier = Modifier,
     authManager: AuthManager,
+    pendingOps: Int,
     onTill: () -> Unit,
     onStock: () -> Unit,
     onProcurement: () -> Unit,
+    onQueue: () -> Unit,
     onSwitchBranch: () -> Unit,
     onLogout: () -> Unit,
 ) {
@@ -62,6 +64,12 @@ fun HomeScreen(
         ModuleCard("Till", "Ring sales over the counter — works offline, syncs on reconnect", MaterialTheme.colorScheme.primary, onTill)
         ModuleCard("Stock", "Balances, low-stock alerts, GRNs, counts, transfers, adjustments", MaterialTheme.colorScheme.secondary, onStock)
         ModuleCard("Procurement", "Reorder suggestions → purchase orders", MaterialTheme.colorScheme.tertiary, onProcurement)
+        ModuleCard(
+            "Sync queue",
+            if (pendingOps > 0) "$pendingOps operation(s) waiting — flush the offline outbox" else "Everything synced — the offline outbox is empty",
+            MaterialTheme.colorScheme.onSurfaceVariant,
+            onQueue,
+        )
 
         Spacer(Modifier.height(24.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

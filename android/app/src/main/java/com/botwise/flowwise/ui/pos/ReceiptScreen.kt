@@ -18,6 +18,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.botwise.flowwise.data.pos.ReceiptData
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Local receipt for a completed sale. The sale is already durable in the
@@ -30,10 +33,13 @@ fun ReceiptScreen(
     receipt: ReceiptData,
     onNewSale: () -> Unit,
 ) {
+    val time = rememberTimestamp(receipt.timestamp)
+
     Column(
         modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        Text("FlowWise", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.primary)
         Text("Sale recorded", style = MaterialTheme.typography.headlineMedium)
         Text(
             "Saved on this till — will sync to the server when online",
@@ -53,13 +59,15 @@ fun ReceiptScreen(
                 }
                 HorizontalDivider()
                 Text("Total      ${receipt.total}", style = MaterialTheme.typography.titleLarge)
-                Text("Tendered   ${receipt.tendered}", style = MaterialTheme.typography.bodyLarge)
+                receipt.tenders.forEach { tender ->
+                    Text(tender, style = MaterialTheme.typography.bodyLarge)
+                }
                 Text("Change     ${receipt.changeDue}", style = MaterialTheme.typography.bodyLarge)
             }
         }
         Spacer(Modifier.height(12.dp))
         Text(
-            "Ref ${receipt.clientOperationId.take(8).uppercase()}",
+            "Ref ${receipt.clientOperationId.take(8).uppercase()} · $time",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -71,4 +79,10 @@ fun ReceiptScreen(
             Text("New sale")
         }
     }
+}
+
+@Composable
+private fun rememberTimestamp(epochMillis: Long): String {
+    val format = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+    return format.format(Date(epochMillis))
 }

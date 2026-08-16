@@ -36,8 +36,23 @@ data class ReceiptData(
     val clientOperationId: String,
     val lines: List<String>,
     val total: String,
-    val tendered: String,
+    val tenders: List<String>,
     val changeDue: String,
+    val timestamp: Long,
+)
+
+/** One tender line on a sale: server tenderType + decimal-string amount. */
+data class TenderEntry(
+    val type: String,
+    val amount: String,
+)
+
+private val TENDER_LABELS = mapOf(
+    "cash" to "Cash",
+    "card" to "Card",
+    "mobileMoney" to "Mobile money",
+    "credit" to "Credit",
+    "other" to "Other",
 )
 
 /** Result of a cash-up, for display on the till. */
@@ -74,6 +89,8 @@ class PosState(
     var receipt by mutableStateOf<ReceiptData?>(null)
         private set
     var shiftResult by mutableStateOf<ShiftResult?>(null)
+        private set
+    var pendingOps by mutableStateOf(0)
         private set
 
     val total: BigDecimal
@@ -113,22 +130,34 @@ class PosState(
         error = null
     }
 
+    /** Refreshes the offline-op counter shown on the till and home screens. */
+    suspend fun refreshPendingOps() {
+        pendingOps = outboxDao.pendingCount()
+    }
+
     /**
      * Completes the sale into the LOCAL outbox (works with zero network).
-     * Tender and totals are decimal strings end to end.
+     * Tenders are (tenderType, decimal-string amount) pairs — cash, card,
+     * mobile money etc. — and the change due is only what the tender sum
+     * exceeds the total by. Tenders and totals stay decimal strings end to end.
      */
-    suspend fun completeSale(tenderedInput: String) {
+    suspend fun completeSale(tendersInput: List<TenderEntry>) {
         if (items.isEmpty()) {
             error = "Cart is empty"
             return
         }
-        val tendered = tenderedInput.toBigDecimalOrNull()
-        if (tendered == null || tendered < BigDecimal.ZERO) {
-            error = "Enter a valid tender amount"
+        val tenders = tendersInput.mapNotNull { entry ->
+            val amount = entry.amount.toBigDecimalOrNull()
+            if (amount == null || amount <= BigDecimal.ZERO) null
+            else TenderEntry(entry.type, amount.toPlainString())
+        }
+        if (tenders.isEmpty()) {
+            error = "Enter at least one tender amount"
             return
         }
-        if (tendered < total) {
-            error = "Tender is less than the total"
+        val totalTendered = tenders.fold(BigDecimal.ZERO) { acc, t -> acc.add(BigDecimal(t.amount)) }
+        if (totalTendered < total) {
+            error = "Tendered is less than the total"
             return
         }
         val branchId = auth.selectedBranchId
@@ -146,15 +175,14 @@ class PosState(
                     .put("quantity", item.quantity.toPlainString()),
             )
         }
-        val tenders = JSONArray().put(
-            JSONObject()
-                .put("tenderType", "cash")
-                .put("amount", tendered.toPlainString()),
-        )
+        val tendersJson = JSONArray()
+        for (t in tenders) {
+            tendersJson.put(JSONObject().put("tenderType", t.type).put("amount", t.amount))
+        }
         val payload = JSONObject()
             .put("branchId", branchId)
             .put("lines", lines)
-            .put("tenders", tenders)
+            .put("tenders", tendersJson)
         shift?.let { payload.put("shiftId", it.id) }
 
         outboxDao.insert(
@@ -170,8 +198,9 @@ class PosState(
             clientOperationId = clientOperationId,
             lines = items.map { "${it.name} × ${it.quantity.toPlainString()}" },
             total = formatMoney(total),
-            tendered = formatMoney(tendered),
-            changeDue = formatMoney(tendered.subtract(total)),
+            tenders = tenders.map { "${TENDER_LABELS[it.type] ?: it.type}  ${formatMoney(BigDecimal(it.amount))}" },
+            changeDue = formatMoney(totalTendered.subtract(total)),
+            timestamp = System.currentTimeMillis(),
         )
         items = emptyList()
         error = null

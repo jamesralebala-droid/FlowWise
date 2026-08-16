@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.botwise.flowwise.data.pos.CartItem
 import com.botwise.flowwise.data.pos.PosState
+import com.botwise.flowwise.data.pos.TenderEntry
 import com.botwise.flowwise.data.pos.formatMoney
 import java.math.BigDecimal
 import kotlinx.coroutines.launch
@@ -38,6 +39,8 @@ import kotlinx.coroutines.launch
 fun PosScreen(
     modifier: Modifier = Modifier,
     state: PosState,
+    pendingOps: Int,
+    onOpenQueue: () -> Unit,
     onScan: () -> Unit,
     onSaleCompleted: () -> Unit,
 ) {
@@ -45,12 +48,22 @@ fun PosScreen(
     var showOpenShift by remember { mutableStateOf(false) }
     var showCashUp by remember { mutableStateOf(false) }
     var openingCash by remember { mutableStateOf("0") }
-    var tender by remember { mutableStateOf("") }
+    var cashTender by remember { mutableStateOf("0") }
+    var cardTender by remember { mutableStateOf("0") }
+    var mobileTender by remember { mutableStateOf("0") }
     var declaredCash by remember { mutableStateOf("0") }
     var declaredCard by remember { mutableStateOf("0") }
     var declaredMobile by remember { mutableStateOf("0") }
     var declaredCredit by remember { mutableStateOf("0") }
     var declaredOther by remember { mutableStateOf("0") }
+
+    val cash = cashTender.toBigDecimalOrNull() ?: BigDecimal.ZERO
+    val card = cardTender.toBigDecimalOrNull() ?: BigDecimal.ZERO
+    val mobile = mobileTender.toBigDecimalOrNull() ?: BigDecimal.ZERO
+    val tendered = cash.add(card).add(mobile)
+    val change = tendered.subtract(state.total)
+    val short = change < BigDecimal.ZERO
+    val canComplete = state.items.isNotEmpty() && !state.busy && tendered > BigDecimal.ZERO && !short
 
     Column(modifier.fillMaxSize().padding(16.dp)) {
         ShiftBanner(
@@ -58,6 +71,24 @@ fun PosScreen(
             onOpen = { showOpenShift = true },
             onCashUp = { showCashUp = true },
         )
+        if (pendingOps > 0) {
+            Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("$pendingOps operation(s) queued offline", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Will sync automatically when the network returns",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = onOpenQueue) { Text("Sync queue") }
+                }
+            }
+        }
         HorizontalDivider(Modifier.padding(vertical = 12.dp))
         Text("Cart", style = MaterialTheme.typography.titleMedium)
 
@@ -84,21 +115,31 @@ fun PosScreen(
         Spacer(Modifier.height(12.dp))
         Text("Total  ${formatMoney(state.total)}", style = MaterialTheme.typography.titleLarge)
 
+        Spacer(Modifier.height(12.dp))
+        Text("Tenders", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            QuickTenderButton("Exact") { cashTender = state.total.toPlainString() }
+            QuickTenderButton("P20") { cashTender = "20" }
+            QuickTenderButton("P50") { cashTender = "50" }
+            QuickTenderButton("P100") { cashTender = "100" }
+            QuickTenderButton("P200") { cashTender = "200" }
+        }
+        Spacer(Modifier.height(8.dp))
+        TenderRow("Cash", cashTender, { cashTender = it })
+        TenderRow("Card", cardTender, { cardTender = it })
+        TenderRow("Mobile money", mobileTender, { mobileTender = it })
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = tender,
-                onValueChange = { tender = it },
-                label = { Text("Cash tendered") },
-                singleLine = true,
+            Text(
+                "Tendered ${formatMoney(tendered)}",
+                style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(12.dp))
-            val change = tender.toBigDecimalOrNull()?.subtract(state.total)
             Text(
-                "Change\n${formatMoney(change ?: BigDecimal.ZERO)}",
+                if (short) "Short ${formatMoney(change.abs())}" else "Change ${formatMoney(change)}",
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (short) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -106,11 +147,17 @@ fun PosScreen(
         Button(
             onClick = {
                 scope.launch {
-                    state.completeSale(tender)
+                    state.completeSale(
+                        listOf(
+                            TenderEntry("cash", cashTender),
+                            TenderEntry("card", cardTender),
+                            TenderEntry("mobileMoney", mobileTender),
+                        ),
+                    )
                     if (state.receipt != null) onSaleCompleted()
                 }
             },
-            enabled = state.items.isNotEmpty() && !state.busy,
+            enabled = canComplete,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         ) {
             Text("Complete sale")
@@ -301,4 +348,25 @@ private fun TenderField(label: String, value: String, onValueChange: (String) ->
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+@Composable
+private fun QuickTenderButton(label: String, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, modifier = Modifier.weight(1f)) {
+        Text(label)
+    }
+}
+
+@Composable
+private fun TenderRow(label: String, value: String, onValueChange: (String) -> Unit) {
+    Spacer(Modifier.height(6.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(96.dp))
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }

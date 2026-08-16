@@ -93,6 +93,10 @@ interface OutboxDao {
 
     @Query("SELECT COUNT(*) FROM outbox_operations WHERE status = 'pending'")
     suspend fun pendingCount(): Int
+
+    /** Recent operations for the Sync queue screen (newest first). */
+    @Query("SELECT * FROM outbox_operations ORDER BY createdAt DESC LIMIT 100")
+    suspend fun recent(): List<OutboxOperationEntity>
 }
 
 @Dao
