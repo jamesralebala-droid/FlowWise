@@ -1,0 +1,36 @@
+{
+  "name": "@flowwise/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "migrate": "bun run src/db/cli.ts",
+    "seed:dev": "bun run src/db/cli-seed.ts",
+    "import:catalogue": "bun run src/import/cli-import-catalogue.ts",
+    "load:test": "bun run scripts/loadtest.ts",
+    "test": "sh scripts/test.sh"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.2.1",
+    "@nestjs/core": "^11.2.1",
+    "@nestjs/platform-express": "^11.2.1",
+    "jose": "^6.2.9",
+    "pg": "^8.23.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.5",
+    "@nestjs/testing": "^11.2.1",
+    "@types/bun": "^1.3.14",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.21.0",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.2.2",
+    "typescript": "^7.0.2"
+  }
+}
