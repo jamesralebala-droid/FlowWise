@@ -3,6 +3,7 @@ import { signOut, useMe } from "../App";
 
 const NAV = [
   { to: "/", label: "Dashboard", end: true },
+  { to: "/pos", label: "Open till" },
   { to: "/reports", label: "Reports" },
   { to: "/customers", label: "Customers" },
   { to: "/payments", label: "Payments" },

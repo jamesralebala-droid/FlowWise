@@ -8,6 +8,12 @@ import Reports from "./pages/Reports";
 import Customers from "./pages/Customers";
 import Payments from "./pages/Payments";
 import Promotions from "./pages/Promotions";
+import Pos from "./pages/Pos";
+import SupplierLogin from "./pages/supplier/SupplierLogin";
+import SupplierLayout, { RequireSupplier } from "./pages/supplier/SupplierLayout";
+import SupplierPos from "./pages/supplier/SupplierPos";
+import SupplierPrices from "./pages/supplier/SupplierPrices";
+import SupplierProfile from "./pages/supplier/SupplierProfile";
 
 function RequireSession({ children }: { children: React.ReactNode }) {
   const [session] = useState<Session | null>(() => loadSession());
@@ -35,6 +41,20 @@ export default function App() {
         <Route path="customers" element={<Customers />} />
         <Route path="payments" element={<Payments />} />
         <Route path="promotions" element={<Promotions />} />
+        <Route path="pos" element={<Pos />} />
+      </Route>
+      <Route path="/supplier/login" element={<SupplierLogin />} />
+      <Route
+        path="/supplier"
+        element={
+          <RequireSupplier>
+            <SupplierLayout />
+          </RequireSupplier>
+        }
+      >
+        <Route index element={<SupplierPos />} />
+        <Route path="prices" element={<SupplierPrices />} />
+        <Route path="profile" element={<SupplierProfile />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

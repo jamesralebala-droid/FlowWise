@@ -55,6 +55,10 @@ import { SalesController } from "./sales/sales.controller.js";
 import { SalesService } from "./sales/sales.service.js";
 import { ShiftsController } from "./shifts/shifts.controller.js";
 import { ShiftsService } from "./shifts/shifts.service.js";
+import { CurrenciesController } from "./currencies/currencies.controller.js";
+import { CurrenciesService } from "./currencies/currencies.service.js";
+import { SupplierPortalController } from "./supplier-portal/supplier-portal.controller.js";
+import { SupplierPortalService } from "./supplier-portal/supplier-portal.service.js";
 
 @Module({
   controllers: [
@@ -81,6 +85,8 @@ import { ShiftsService } from "./shifts/shifts.service.js";
     ReceiptsController,
     PromotionsController,
     MobileMoneyController,
+    CurrenciesController,
+    SupplierPortalController,
     HealthController,
   ],
   providers: [
@@ -114,6 +120,8 @@ import { ShiftsService } from "./shifts/shifts.service.js";
     ReceiptsService,
     PromotionsService,
     MobileMoneyService,
+    CurrenciesService,
+    SupplierPortalService,
     { provide: RECEIPT_SENDER, useFactory: () => (env.resendApiKey ? new ResendSender(env.resendApiKey) : null) },
     {
       provide: MOBILE_MONEY_PROVIDER,

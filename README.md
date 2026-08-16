@@ -11,7 +11,9 @@ everything reconciles exactly, replay-safe, against a single source of truth.
 > (Inventory ops) ✅ + Phase 3 (Procurement & intelligence) ✅ + Phase 4
 > (Hardening & rollout) ✅ + Phase 5 (Customers, credit, reports & eReceipts)
 > ✅ + Phase 6 (Mobile money, loyalty & discounts, web reports, receipt
-> printing) ✅ — implemented & test-verified in this repo.**
+> printing) ✅ + Phase 7 (Mobile-money payouts, multi-currency, POS web
+> client, supplier portal, APK artifacts) ✅ — implemented & test-verified in
+> this repo.**
 > Backend: NestJS + PostgreSQL 15+ (migrations, RLS, OAuth2 PKCE, ledger
 > invariants, sales/shifts/outbox/reports, GRN/batches/FEFO/counts/transfers/
 > adjustments, reorder rules/suggestions, purchase orders with partial
@@ -22,8 +24,12 @@ everything reconciles exactly, replay-safe, against a single source of truth.
 > Phase 6: promotions/discount codes, loyalty points (earn + redeem),
 > mobile-money tender (Dodo Payments, webhook-confirmed), a Vite + React
 > web reports dashboard (OAuth2 PKCE), and ESC/POS thermal receipt printing
-> from the till.
-> Android: builds in CI via `gradle :app:assembleDebug`.
+> from the till. Phase 7: mobile-money refunds to wallets (provider
+> payouts), multi-currency tenders with per-org FX rates, a full POS web
+> client (till in the browser), a supplier self-service portal (POs +
+> price list), and APK artifacts from CI.
+> Android: builds in CI via `gradle :app:assembleDebug` — APK uploaded as an
+> artifact; release APK via workflow_dispatch/tags.
 > Web: builds in CI via `vite build`.
 
 ## The five invariants (non-negotiable)
@@ -46,7 +52,7 @@ backend/          NestJS + TypeScript API (REST /v1)
                  · 004 sales · 005 shifts/cash-up · 006 inventory ops
                  · 007 procurement · 008 hardening (throttle, data import)
                  · 009 customers/credit/eReceipts · 010 promotions/loyalty/
-                 mobile money
+                 mobile money · 011 payouts/currencies/supplier portal
   src/            db layer, OAuth2 PKCE, guards, catalogue, idempotency,
                   sales, shifts, outbox, reports, audit, import, inventory
                   (suppliers, GRNs, transfers, counts, adjustments, stock
@@ -54,7 +60,8 @@ backend/          NestJS + TypeScript API (REST /v1)
                   webhooks, scorecard), customers (accounts, ledger,
                   settlements), receipts (eReceipt email via Resend),
                   promotions (discount codes), mobile-money (provider
-                  adapters, webhook)
+                  adapters, webhook, payouts), currencies (FX rates),
+                  supplier-portal (self-service API)
   test/           PGlite-backed integration tests (RLS, ledger, OAuth,
                   catalogue, sales, shifts, outbox, reports, inventory,
                   FEFO, procurement, import, throttling, customers,
@@ -63,7 +70,8 @@ backend/          NestJS + TypeScript API (REST /v1)
   scripts/        test.sh · loadtest.ts · backup.sh · restore.sh
 android/          Kotlin + Jetpack Compose app (Room/SQLCipher, WorkManager,
                   ML Kit, ESC/POS thermal printing)
-web/              Vite + React reports dashboard (OAuth2 PKCE, recharts)
+web/              Vite + React dashboard + POS web client + supplier portal
+                  (OAuth2 PKCE, recharts)
 docs/OPS.md       Operations runbook: deploy, backup/restore, monitoring,
                   incident response, pilot + training checklists
 ```
@@ -122,6 +130,7 @@ a no-op (verified by `test/seed.test.ts`). The Android app uses OAuth client
 | `RECEIPT_EMAIL_FROM` | `FlowWise <onboarding@resend.dev>` | eReceipt sender address (verify your domain in Resend) |
 | `DODO_API_KEY` | *(unset)* | Mobile money: Dodo Payments secret key. Unset → `mock` provider (instantly confirms, demo/sandbox) |
 | `DODO_WEBHOOK_SECRET` | *(unset)* | Mobile money: HMAC secret verifying `POST /v1/mobile-money/webhook`. Unset → webhook refuses every callback |
+| `SUPPLIER_TOKEN_TTL_SECONDS` | `86400` | Supplier-portal access-token lifetime (24h, re-login on expiry) |
 
 **Web dashboard:** `web/` is a Vite + React app (`bun --cwd web dev` for the
 dev server, default `http://localhost:5173`). It signs in through the same
@@ -329,6 +338,41 @@ tender-type allocation is a Phase 2 refinement (refunds currently net against
   earn/redeem and mobile-money confirmed/pending totals; `margin` and
   `top-products` keep working unchanged.
 
+### Phase 7 (mobile-money payouts, multi-currency, POS web client, supplier portal — verified by `bun run test`)
+
+| Endpoint | Permission / principal | Purpose |
+| --- | --- | --- |
+| `POST /v1/sales/:id/refund` (mobile-money sale) | `pos.refund` | Refund **pays the customer back to their wallet**: the refund transaction inserts a `pending` payout referencing the original payment; the provider `refund()` runs after commit (a failure marks the payout `failed`, the refund stands); confirmation arrives via the signed webhook or the status pull |
+| `GET /v1/mobile-money/payouts[?branchId&status]` | `payment.read` | Payout (refund-to-wallet) statuses for till/back-office pulls |
+| `GET /v1/currencies` | `catalogue.read` | Org currency list incl. base (rate 1) |
+| `POST /v1/currencies` · `PUT /:code` | `settings.manage` | Add a currency / update its `rateToBase` (base pinned at 1; duplicates rejected) |
+| `POST /v1/sales` (tender with `currency`) | `pos.sell` | Foreign-currency cash/card tenders convert at the day's rate; totals, ledgers, shifts and reports stay in base currency; `sale_tenders` keeps `amountFx` + `fxRate` for receipts |
+| `POST /v1/supplier-portal/login` | *(public)* | Supplier credentials → short-lived `kind=supplier` token scoped to ONE supplier entity (same brute-force throttle as staff login) |
+| `GET /v1/supplier-portal/me` · `PUT /me` | supplier | Profile + contact info (supplier's own record) |
+| `GET /v1/supplier-portal/purchase-orders[/:id]` | supplier | Their POs (sent onward) with lines, received and outstanding quantities |
+| `GET /v1/supplier-portal/price-list` · `PUT /price-list/:variantId` | supplier | Suppliers maintain their own cost hints (feed margins/POs), audited as `supplier.price_update` |
+
+**Phase 7 notes:**
+
+- **Payouts are ledger-safe.** A refund creates the payout row in the same
+  transaction as the refund document (Invariant 3) with a
+  `client_operation_id`-scoped idempotency key (one payout per refund, replay
+  returns the stored refund). Provider refunds run after commit — the gateway
+  can never block a refund that already happened on the ledger.
+- **Multi-currency is tender-level.** Products stay priced in the org's base
+  currency; only cash/card/other tenders may be in a foreign currency
+  (mobile money and credit are base-only — the gateway and the receivable
+  ledger both need a single currency). Rates are per-org, edited by owners,
+  and stored on each tender row so historic receipts never reprice.
+- **The supplier portal is a separate principal.** Supplier tokens carry
+  `kind=supplier` + `supplierId`; every portal query is scoped by that id in
+  the org's tenant context (RLS still enforced). Staff tokens cannot call
+  portal endpoints and vice versa.
+- **CI ships APKs.** Every CI run uploads `app-debug.apk` as an artifact
+  (14-day retention) so the till team can side-load without a dev box; a
+  `workflow_dispatch` or `v*` tag push builds an unsigned minified release
+  APK (30-day artifact).
+
 ## Android
 
 `android/` — Kotlin + Jetpack Compose, Room over SQLCipher (encrypted local
@@ -354,18 +398,33 @@ worker (auto) or the Sync queue screen (manual "Sync now") — same shared
 flush path, replay-safe via `client_operation_id`. Customers gives account
 balances, creation, statements and offline-queued payments; Reports shows
 the sales summary + tender mix, stock valuation and top products for
-Today / 7 days / 30 days.
+Today / 7 days / 30 days. APKs: every CI run uploads the debug APK as an
+artifact; run the **Android release APK** job (or push a `v*` tag) for the
+minified release build.
 
-## Web dashboard
+## Web dashboard & POS
 
-`web/` — a Vite + React reports dashboard for managers and owners: signed
-in with the same OAuth2 PKCE flow as the app (no redirect — the backend's
+`web/` — a Vite + React app for managers, cashiers and suppliers, signed in
+with the same OAuth2 PKCE flow as the app (no redirect — the backend's
 native-client JSON endpoints exchange directly), tokens in `sessionStorage`
-with refresh-and-retry. Pages: **Dashboard** (period KPIs, tender-mix pie,
-top products, loyalty + latest mobile-money payments), **Reports** (sales
-summary, daily buckets, stock valuation, margin), **Customers** (searchable
-balances/limits/points + statement viewer), **Payments** (mobile-money
-status with filters) and **Promotions** (create/edit discount codes).
+with refresh-and-retry. Pages:
+
+- **Dashboard** (period KPIs, tender-mix pie, top products, loyalty + latest
+  mobile-money payments), **Reports** (sales summary, daily buckets, stock
+  valuation, margin), **Customers** (searchable balances/limits/points +
+  statement viewer), **Payments** (mobile-money payments AND payouts with
+  status filters) and **Promotions** (create/edit discount codes).
+- **Open till** (`/pos`, Phase 7) — a full browser till: searchable product
+  grid, cart with quantity controls, cash/card/mobile-money/credit tenders
+  with foreign-currency support (cash/card in ZAR/USD convert at the day's
+  rate), customer picker with loyalty points, promo codes, shift
+  open/close, receipt view + print, and refunds that pay mobile-money
+  customers back to their wallet. Sales are server-priced and replay-safe
+  (`client_operation_id`); the browser is assumed online.
+- **Supplier portal** (`/supplier`, Phase 7) — a separate login for supplier
+  accounts (`<code>@flowwise.demo` / `Password123!` in the demo seed).
+  Suppliers see their purchase orders with received/outstanding quantities
+  and maintain their own price list (cost hints) and contact details.
 
 ```bash
 bun --cwd web install
@@ -384,6 +443,7 @@ VITE_API_BASE_URL=https://api.example.com/v1 bun --cwd web build
 | 4 | Load/security/restore/device testing, data import, training, pilot | ✅ backend hardening + runbook (`docs/OPS.md`) — pilot checklists ready |
 | 5 | Customer accounts & credit sales, reports & analytics, eReceipts, Android build in CI | ✅ backend + Android + CI (`gradle :app:assembleDebug`) |
 | 6 | Mobile-money tender, loyalty & discounts, web reports dashboard, receipt printing | ✅ backend + Android + web + CI (3 jobs) |
+| 7 | Mobile-money payouts, refunds-to-wallet, multi-currency tenders, POS web client, supplier portal, APK artifacts | ✅ backend + web + CI (4 jobs) |
 
 `stock_ledger` → `apply_stock_ledger()` → `inventory_items` (with
 `v_stock_reconciliation`) is already live in migration 003, so Phase 1 builds

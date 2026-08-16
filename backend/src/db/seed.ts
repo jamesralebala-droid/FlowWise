@@ -221,6 +221,32 @@ export async function seedDemoData(exec: SqlExecutor, passwordHash: string): Pro
     );
   }
 
+  // ---- Phase 7: currencies + supplier portal accounts ----------------------
+  // Base currency (rate 1) + two practical FX pairs for the demo.
+  for (const c of [
+    { code: "BWP", name: "Botswana Pula", isBase: true, rate: "1" },
+    { code: "ZAR", name: "South African Rand", isBase: false, rate: "0.74" },
+    { code: "USD", name: "US Dollar", isBase: false, rate: "13.20" },
+  ]) {
+    await exec.query(
+      `INSERT INTO currencies (org_id, code, name, is_base, rate_to_base)
+       VALUES ($1, $2, $3, $4, $5::numeric(14,8))
+       ON CONFLICT (org_id, code) DO UPDATE SET name = EXCLUDED.name, rate_to_base = EXCLUDED.rate_to_base`,
+      [orgId, c.code, c.name, c.isBase, c.rate],
+    );
+  }
+  // One portal login per demo supplier: <code-lower>@flowwise.demo /
+  // Password123! — same password as the staff accounts.
+  for (const s of SUPPLIERS) {
+    await exec.query(
+      `INSERT INTO supplier_users (org_id, supplier_id, email, name, password_hash)
+       SELECT $1, id, $3, name, $4
+       FROM suppliers WHERE org_id = $1 AND code = $2
+       ON CONFLICT (org_id, email) DO UPDATE SET name = EXCLUDED.name`,
+      [orgId, s.code, `${s.code.toLowerCase()}@flowwise.demo`, passwordHash],
+    );
+  }
+
   const priceListId = await insertReturningId(
     exec,
     `INSERT INTO price_lists (org_id, name, is_default, currency)

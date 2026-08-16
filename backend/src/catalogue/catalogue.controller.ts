@@ -50,9 +50,14 @@ export class CatalogueController {
           tx.query(`SELECT id, name, rate FROM taxes WHERE org_id = $1 AND is_active`, [claims.org]),
           tx.query(`SELECT id, code, name FROM units_of_measure WHERE org_id = $1 AND is_active`, [claims.org]),
         ]);
+        const org = await tx.query(
+          `SELECT COALESCE((SELECT code FROM currencies WHERE org_id = $1 AND is_base), currency_code)::text AS currency
+           FROM organisations WHERE id = $1`,
+          [claims.org],
+        );
         return {
           branchId: branchId ?? null,
-          currency: "BWP",
+          currency: (org.rows[0]?.currency as string | undefined) ?? "BWP",
           products: products.rows,
           variants: variants.rows,
           barcodes: barcodes.rows,
