@@ -63,6 +63,11 @@ jobs:
     name: Android release APK
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +93,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: flowwise-release-apk
-          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          path: android/app/build/outputs/apk/release/*.apk
           retention-days: 30
 
   web:

@@ -12,8 +12,9 @@ everything reconciles exactly, replay-safe, against a single source of truth.
 > (Hardening & rollout) ✅ + Phase 5 (Customers, credit, reports & eReceipts)
 > ✅ + Phase 6 (Mobile money, loyalty & discounts, web reports, receipt
 > printing) ✅ + Phase 7 (Mobile-money payouts, multi-currency, POS web
-> client, supplier portal, APK artifacts) ✅ — implemented & test-verified in
-> this repo.**
+> client, supplier portal, APK artifacts) ✅ + Phase 8 (refunds on the
+> Android till, signed release builds, supplier delivery notes → GRNs,
+> single-origin hosting) ✅ — implemented & test-verified in this repo.**
 > Backend: NestJS + PostgreSQL 15+ (migrations, RLS, OAuth2 PKCE, ledger
 > invariants, sales/shifts/outbox/reports, GRN/batches/FEFO/counts/transfers/
 > adjustments, reorder rules/suggestions, purchase orders with partial
@@ -27,10 +28,16 @@ everything reconciles exactly, replay-safe, against a single source of truth.
 > from the till. Phase 7: mobile-money refunds to wallets (provider
 > payouts), multi-currency tenders with per-org FX rates, a full POS web
 > client (till in the browser), a supplier self-service portal (POs +
-> price list), and APK artifacts from CI.
+> price list), and APK artifacts from CI. Phase 8: full refund screen on the
+> Android till (queue through the outbox), release APKs signed from CI
+> keystore secrets, supplier delivery notes that land as draft GRNs the
+> branch posts into stock, and the API serving the built web dashboard as
+> static files on one origin.
 > Android: builds in CI via `gradle :app:assembleDebug` — APK uploaded as an
-> artifact; release APK via workflow_dispatch/tags.
-> Web: builds in CI via `vite build`.
+> artifact; release APK via workflow_dispatch/tags, signed when
+> `ANDROID_KEYSTORE_B64` + passwords are set as CI secrets.
+> Web: builds in CI via `vite build`; the production API serves `web/dist`
+> on the same origin (SPA fallback).
 
 ## The five invariants (non-negotiable)
 
@@ -131,6 +138,8 @@ a no-op (verified by `test/seed.test.ts`). The Android app uses OAuth client
 | `DODO_API_KEY` | *(unset)* | Mobile money: Dodo Payments secret key. Unset → `mock` provider (instantly confirms, demo/sandbox) |
 | `DODO_WEBHOOK_SECRET` | *(unset)* | Mobile money: HMAC secret verifying `POST /v1/mobile-money/webhook`. Unset → webhook refuses every callback |
 | `SUPPLIER_TOKEN_TTL_SECONDS` | `86400` | Supplier-portal access-token lifetime (24h, re-login on expiry) |
+| `WEB_DIST` | *(auto-detected: `web/dist`)* | Absolute path to the built web dashboard; when present the API serves it as static files with an SPA fallback (Phase 8 single-origin hosting) |
+| `ANDROID_KEYSTORE_B64` · `ANDROID_KEYSTORE_PASSWORD` · `ANDROID_KEY_ALIAS` · `ANDROID_KEY_PASSWORD` | *(unset)* | CI signing secrets for the release APK (base64 keystore + credentials). Unset → release builds stay unsigned (side-load friendly) |
 
 **Web dashboard:** `web/` is a Vite + React app (`bun --cwd web dev` for the
 dev server, default `http://localhost:5173`). It signs in through the same
@@ -370,8 +379,38 @@ tender-type allocation is a Phase 2 refinement (refunds currently net against
   portal endpoints and vice versa.
 - **CI ships APKs.** Every CI run uploads `app-debug.apk` as an artifact
   (14-day retention) so the till team can side-load without a dev box; a
-  `workflow_dispatch` or `v*` tag push builds an unsigned minified release
-  APK (30-day artifact).
+  `workflow_dispatch` or `v*` tag push builds a minified release APK
+  (30-day artifact).
+
+### Phase 8 (till refunds, signed releases, supplier delivery notes, single-origin hosting — verified by `bun run test`)
+
+| Endpoint | Permission / principal | Purpose |
+| --- | --- | --- |
+| `POST /v1/supplier-portal/delivery-notes` | supplier | **Delivery-note submission**: creates a DRAFT GRN tied to the PO with unit costs snapshotted from the PO (never client-supplied). Idempotent per (PO, lines) — retrying the same drop returns the same draft; over-delivery beyond the outstanding quantity (posted + pending) is rejected, and only the PO's own supplier can submit. The branch reviews the draft and posts it with the normal `POST /v1/grns/:id/post` |
+| `POST /v1/grns/:id/post` (delivery-note GRN) | `stock.grn` | **Batch approval**: posting one delivery-note GRN posts every pending delivery-note GRN for that PO in the same transaction — stock and PO received-quantity move together (Invariant 3), the PO advances to `received` when the declared batch completes it |
+
+**Phase 8 notes:**
+
+- **Refunds are now on the Android till.** A refund screen (Home → Refunds)
+  lists recent sales, lets the cashier pick one, enter the refund amount +
+  reason, and queues a `refund` op in the local outbox — it syncs with the
+  same replay-safe path as every other offline write, and refunds of
+  mobile-money sales pay the customer back to their wallet (Phase 7).
+- **Release signing is secret-driven.** `android/app/build.gradle.kts` reads
+  `android/keystore.properties` (local, gitignored) or CI secrets
+  (`ANDROID_KEYSTORE_B64` + passwords/alias). No keystore configured → the
+  release build stays unsigned; CI decodes the base64 keystore to a temp
+  file only when the secret is set.
+- **Delivery notes flow into GRNs, not straight to stock.** The supplier's
+  declaration becomes a *draft* GRN the branch can inspect and post; until
+  posted there is no ledger effect. Posting one delivery-note GRN approves
+  the whole declared batch for that PO, so partial drops can't be approved
+  out of order and the PO can never be over-received.
+- **One origin in production.** The NestJS API serves the built `web/dist`
+  (dashboard + POS + supplier portal) as static files with an SPA fallback
+  for client routes; `/v1/*` is never intercepted. `bun run build` at the
+  root builds backend + web, and `bun run start` boots the API which serves
+  both — no separate static host or CORS config needed.
 
 ## Android
 
@@ -391,7 +430,10 @@ asynchronously), and you can queue an **eReceipt** by entering the
 customer's email before completing. Phase 6 adds a **promo-code field** and
 **loyalty redemption** (points shown for the selected customer, capped at
 what they hold) to the till, and the receipt screen prints to a bonded
-Bluetooth thermal printer (ESC/POS, 58 mm, permission-aware). Sales, GRNs,
+Bluetooth thermal printer (ESC/POS, 58 mm, permission-aware), and a
+**Refunds** screen queues `refund` ops through the same outbox — pick a sale,
+enter the amount + reason, and it syncs replay-safe (mobile-money refunds
+pay back to the customer's wallet). Sales, GRNs,
 transfers, adjustments, **settlements** and **receipt emails** are saved to
 the local outbox first and pushed via `POST /v1/outbox` by a WorkManager
 worker (auto) or the Sync queue screen (manual "Sync now") — same shared
@@ -444,6 +486,7 @@ VITE_API_BASE_URL=https://api.example.com/v1 bun --cwd web build
 | 5 | Customer accounts & credit sales, reports & analytics, eReceipts, Android build in CI | ✅ backend + Android + CI (`gradle :app:assembleDebug`) |
 | 6 | Mobile-money tender, loyalty & discounts, web reports dashboard, receipt printing | ✅ backend + Android + web + CI (3 jobs) |
 | 7 | Mobile-money payouts, refunds-to-wallet, multi-currency tenders, POS web client, supplier portal, APK artifacts | ✅ backend + web + CI (4 jobs) |
+| 8 | Till refunds (Android outbox), signed release builds, supplier delivery notes → GRNs, single-origin hosting | ✅ backend + Android + web + CI (Phase 8) |
 
 `stock_ledger` → `apply_stock_ledger()` → `inventory_items` (with
 `v_stock_reconciliation`) is already live in migration 003, so Phase 1 builds
