@@ -25,11 +25,14 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.botwise.flowwise.data.customers.CustomersState
 import com.botwise.flowwise.data.outbox.OutboxState
 import com.botwise.flowwise.data.outbox.OutboxWorker
 import com.botwise.flowwise.data.pos.PosState
+import com.botwise.flowwise.data.reports.ReportsState
 import com.botwise.flowwise.data.sync.CatalogueSyncWorker
 import com.botwise.flowwise.ui.branches.BranchSelectScreen
+import com.botwise.flowwise.ui.customers.CustomersScreen
 import com.botwise.flowwise.ui.home.HomeScreen
 import com.botwise.flowwise.ui.inventory.InventoryScreen
 import com.botwise.flowwise.ui.login.LoginScreen
@@ -37,6 +40,7 @@ import com.botwise.flowwise.ui.pos.PosScreen
 import com.botwise.flowwise.ui.pos.ReceiptScreen
 import com.botwise.flowwise.ui.procurement.ProcurementScreen
 import com.botwise.flowwise.ui.queue.OutboxScreen
+import com.botwise.flowwise.ui.reports.ReportsScreen
 import com.botwise.flowwise.ui.scan.BarcodeScanScreen
 import com.botwise.flowwise.ui.theme.FlowWiseTheme
 import java.util.concurrent.TimeUnit
@@ -110,7 +114,7 @@ private fun schedulePeriodicOutboxFlush(context: Context) {
     )
 }
 
-private enum class AppRoute { HOME, TILL_CART, TILL_SCAN, TILL_RECEIPT, INVENTORY, PROCUREMENT, QUEUE }
+private enum class AppRoute { HOME, TILL_CART, TILL_SCAN, TILL_RECEIPT, INVENTORY, PROCUREMENT, CUSTOMERS, REPORTS, QUEUE }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -128,6 +132,12 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
     val procurementState = remember {
         com.botwise.flowwise.data.procurement.ProcurementState(container.apiClient, container.authManager)
     }
+    val customersState = remember {
+        CustomersState(container.apiClient, container.authManager, container.outboxDao)
+    }
+    val reportsState = remember {
+        ReportsState(container.apiClient, container.authManager)
+    }
     val outboxState = remember {
         OutboxState(container.apiClient, container.authManager, container.outboxDao)
     }
@@ -143,6 +153,8 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
         route == AppRoute.TILL_CART -> "Till"
         route == AppRoute.INVENTORY -> "Stock"
         route == AppRoute.PROCUREMENT -> "Procurement"
+        route == AppRoute.CUSTOMERS -> "Customers"
+        route == AppRoute.REPORTS -> "Reports"
         route == AppRoute.QUEUE -> "Sync queue"
         else -> "FlowWise"
     }
@@ -182,6 +194,8 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
                 onTill = { route = AppRoute.TILL_CART },
                 onStock = { route = AppRoute.INVENTORY },
                 onProcurement = { route = AppRoute.PROCUREMENT },
+                onCustomers = { route = AppRoute.CUSTOMERS },
+                onReports = { route = AppRoute.REPORTS },
                 onQueue = { route = AppRoute.QUEUE },
                 onSwitchBranch = { branchSelected = false },
                 onLogout = {
@@ -200,6 +214,7 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
             route == AppRoute.TILL_RECEIPT && posState.receipt != null -> ReceiptScreen(
                 modifier = Modifier.padding(padding),
                 receipt = posState.receipt!!,
+                onEmailReceipt = { to -> posState.emailReceipt(posState.receipt!!.clientOperationId, to) },
                 onNewSale = {
                     posState.dismissReceipt()
                     route = AppRoute.TILL_CART
@@ -214,6 +229,14 @@ private fun AppNav(container: com.botwise.flowwise.di.AppContainer) {
             route == AppRoute.PROCUREMENT -> ProcurementScreen(
                 modifier = Modifier.padding(padding),
                 state = procurementState,
+            )
+            route == AppRoute.CUSTOMERS -> CustomersScreen(
+                modifier = Modifier.padding(padding),
+                state = customersState,
+            )
+            route == AppRoute.REPORTS -> ReportsScreen(
+                modifier = Modifier.padding(padding),
+                state = reportsState,
             )
             route == AppRoute.QUEUE -> OutboxScreen(
                 modifier = Modifier.padding(padding),

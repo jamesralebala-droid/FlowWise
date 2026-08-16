@@ -38,6 +38,7 @@ async function main(): Promise<void> {
           `  Suppliers:       ${result.suppliers}\n` +
           `  Opening ledger:  ${result.openingLedgerRows} movements (movement_type 'opening')\n` +
           `  Reorder rules:   ${result.reorderRules}\n` +
+          `  Customers:       ${result.customers} (1 with a credit limit + opening balance)\n` +
           `  Demo users:      ${result.users} (password "Password123!")\n` +
           `  OAuth client:    flowwise-app\n` +
           `\nDemo logins: owner@, manager@, cashier@, cashier2@, stock@, auditor@flowwise.demo\n` +

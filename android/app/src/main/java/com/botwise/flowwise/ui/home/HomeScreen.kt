@@ -35,6 +35,8 @@ fun HomeScreen(
     onTill: () -> Unit,
     onStock: () -> Unit,
     onProcurement: () -> Unit,
+    onCustomers: () -> Unit,
+    onReports: () -> Unit,
     onQueue: () -> Unit,
     onSwitchBranch: () -> Unit,
     onLogout: () -> Unit,
@@ -64,6 +66,8 @@ fun HomeScreen(
         ModuleCard("Till", "Ring sales over the counter — works offline, syncs on reconnect", MaterialTheme.colorScheme.primary, onTill)
         ModuleCard("Stock", "Balances, low-stock alerts, GRNs, counts, transfers, adjustments", MaterialTheme.colorScheme.secondary, onStock)
         ModuleCard("Procurement", "Reorder suggestions → purchase orders", MaterialTheme.colorScheme.tertiary, onProcurement)
+        ModuleCard("Customers", "Accounts, credit sales and payments", MaterialTheme.colorScheme.tertiary, onCustomers)
+        ModuleCard("Reports", "Sales summary, stock valuation, top products", MaterialTheme.colorScheme.secondary, onReports)
         ModuleCard(
             "Sync queue",
             if (pendingOps > 0) "$pendingOps operation(s) waiting — flush the offline outbox" else "Everything synced — the offline outbox is empty",

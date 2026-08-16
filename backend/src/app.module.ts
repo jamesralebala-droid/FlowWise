@@ -38,6 +38,10 @@ import { ReorderService } from "./procurement/reorder.service.js";
 import { ScorecardController } from "./procurement/scorecard.controller.js";
 import { WebhooksController } from "./procurement/webhooks.controller.js";
 import { WebhooksService } from "./procurement/webhooks.service.js";
+import { CustomersController } from "./customers/customers.controller.js";
+import { CustomersService } from "./customers/customers.service.js";
+import { ReceiptsController } from "./receipts/receipts.controller.js";
+import { ReceiptsService, RECEIPT_SENDER, ResendSender } from "./receipts/receipts.service.js";
 import { SalesController } from "./sales/sales.controller.js";
 import { SalesService } from "./sales/sales.service.js";
 import { ShiftsController } from "./shifts/shifts.controller.js";
@@ -64,6 +68,8 @@ import { ShiftsService } from "./shifts/shifts.service.js";
     PurchaseOrdersController,
     WebhooksController,
     AuditController,
+    CustomersController,
+    ReceiptsController,
     HealthController,
   ],
   providers: [
@@ -93,6 +99,9 @@ import { ShiftsService } from "./shifts/shifts.service.js";
     ReorderService,
     PurchaseOrdersService,
     WebhooksService,
+    CustomersService,
+    ReceiptsService,
+    { provide: RECEIPT_SENDER, useFactory: () => (env.resendApiKey ? new ResendSender(env.resendApiKey) : null) },
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
     { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },

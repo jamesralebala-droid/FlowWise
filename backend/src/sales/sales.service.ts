@@ -35,6 +35,8 @@ export interface CreateSaleInput {
   branchId: string;
   /** Optional in Phase 1 — the till always provides the open shift. */
   shiftId?: string;
+  /** Phase 5: account customer. Required when any tender is 'credit'. */
+  customerId?: string;
   notes?: string;
   lines: SaleLineInput[];
   tenders: SaleTenderInput[];
@@ -171,18 +173,48 @@ export class SalesService {
     );
     const tendered = (tenderedRow.rows[0].tendered as string) ?? "0.0000";
 
+    // Phase 5 credit: the credit tender portion becomes a receivable on the
+    // customer's account IN THE SAME TRANSACTION as the sale (Invariant 3).
+    const creditTenders = (input.tenders ?? []).filter((t) => t.tenderType === "credit");
+    const customerId = input.customerId?.trim() || null;
+    let creditPortion = "0.0000";
+    if (creditTenders.length > 0) {
+      if (!customerId) throw new BadRequestException("customerId is required for credit sales");
+      const creditSum = await tx.query(
+        `SELECT COALESCE(SUM(amount), 0)::numeric(14,4) AS credit
+         FROM (VALUES ${creditTenders.map((_, i) => `($${i + 1}::numeric(14,4))`).join(", ")}) AS t(amount)`,
+        creditTenders.map((t) => t.amount),
+      );
+      creditPortion = creditSum.rows[0].credit as string;
+
+      const customer = await tx.query(
+        `SELECT c.id, c.credit_limit AS "creditLimit", COALESCE(b.balance, 0)::numeric(14,4) AS balance
+         FROM customers c
+         LEFT JOIN v_customer_balances b ON b.customer_id = c.id AND b.org_id = c.org_id
+         WHERE c.id = $1 AND c.org_id = $2 AND c.is_active`,
+        [customerId, claims.org],
+      );
+      if (customer.rows.length === 0) throw new BadRequestException("Unknown or inactive customer");
+      if (Number(customer.rows[0].creditLimit) <= 0) {
+        throw new BadRequestException("This customer has no credit limit — cash/card only");
+      }
+      if (Number(customer.rows[0].balance) + Number(creditPortion) > Number(customer.rows[0].creditLimit)) {
+        throw new BadRequestException("Credit sale exceeds the customer's credit limit");
+      }
+    }
+
     const sale = await tx.query(
       `INSERT INTO sales
-         (org_id, branch_id, user_id, device_id, shift_id, client_operation_id, status,
+         (org_id, branch_id, user_id, device_id, shift_id, customer_id, client_operation_id, status,
           subtotal, discount, tax_total, total, tendered, change_due, notes, completed_at)
-       SELECT $1, $2, $3, $4, $5, $6, 'completed',
+       SELECT $1, $2, $3, $4, $5, $6, $7, 'completed',
               (SELECT COALESCE(SUM(line_total), 0) FROM _sale_priced),
               0,
               (SELECT COALESCE(SUM(tax_amount), 0) FROM _sale_priced),
               (SELECT COALESCE(SUM(line_total + tax_amount), 0) FROM _sale_priced),
-              $7::numeric(14,4),
-              GREATEST($7::numeric(14,4) - (SELECT COALESCE(SUM(line_total + tax_amount), 0) FROM _sale_priced), 0),
-              $8, now()
+              $8::numeric(14,4),
+              GREATEST($8::numeric(14,4) - (SELECT COALESCE(SUM(line_total + tax_amount), 0) FROM _sale_priced), 0),
+              $9, now()
        RETURNING id, subtotal, tax_total, total, tendered, change_due`,
       [
         claims.org,
@@ -190,12 +222,37 @@ export class SalesService {
         claims.sub,
         claims.dev ?? null,
         input.shiftId ?? null,
+        customerId,
         input.clientOperationId,
         tendered,
         input.notes ?? null,
       ],
     );
     const saleId = sale.rows[0].id as string;
+
+    // Credit portion → receivable (debt increases). Replay-safe via the
+    // sale's own client_operation_id (Invariant 4); the sale replay path
+    // returns early, so this row is written exactly once.
+    if (Number(creditPortion) > 0) {
+      await tx.query(
+        `INSERT INTO customer_ledger
+           (org_id, customer_id, branch_id, entry_type, amount, reference_type, reference_id,
+            notes, client_operation_id, business_time, created_by_user_id, created_by_device_id)
+         VALUES ($1, $2, $3, 'sale', $4::numeric(14,4), 'sale', $5,
+                 $6, 'sale:' || $7, now(), $8, $9)`,
+        [
+          claims.org,
+          customerId,
+          input.branchId,
+          creditPortion,
+          saleId,
+          "Credit sale" + (input.notes ? ` — ${input.notes}` : ""),
+          input.clientOperationId,
+          claims.sub,
+          claims.dev ?? null,
+        ],
+      );
+    }
 
     // Phase 2 FEFO: resolve the batch(es) each line draws from before writing
     // anything (explicit batch or auto-pick by expiry; oversell rejected).
@@ -370,6 +427,29 @@ export class SalesService {
         );
         const refundId = refund.rows[0].id as string;
 
+        // A refund of a credit sale reduces the receivable by the refunded
+        // amount (capped at the credit portion) — same transaction, Invariant 3.
+        const creditSale = await tx.query(
+          `SELECT s.customer_id AS "customerId",
+                  COALESCE((SELECT SUM(st.amount) FROM sale_tenders st
+                            WHERE st.sale_id = s.id AND st.tender_type = 'credit'), 0)::numeric(14,4) AS credit
+           FROM sales s WHERE s.id = $1 AND s.org_id = $2`,
+          [input.saleId, claims.org],
+        );
+        const creditCustomer = creditSale.rows[0]?.customerId as string | undefined;
+        const creditPortion = (creditSale.rows[0]?.credit as string) ?? "0.0000";
+        if (creditCustomer && Number(creditPortion) > 0) {
+          const reduction = Number(amount) <= Number(creditPortion) ? amount : creditPortion;
+          await tx.query(
+            `INSERT INTO customer_ledger
+               (org_id, customer_id, branch_id, entry_type, amount, reference_type, reference_id,
+                notes, client_operation_id, business_time, created_by_user_id, created_by_device_id)
+             VALUES ($1, $2, $3, 'refund', -$4::numeric(14,4), 'sale_refund', $5,
+                     'Refund reduces credit portion', 'refund:' || $6, now(), $7, $8)`,
+            [claims.org, creditCustomer, sale.rows[0].branch_id as string, reduction, refundId, opId, claims.sub, claims.dev ?? null],
+          );
+        }
+
         // Reverse the ORIGINAL sale's ledger rows, per batch — restoration is
         // faithful to exactly what was sold (batch-aware; reproducible from
         // the ledger alone, never from client claims).
@@ -441,7 +521,7 @@ export class SalesService {
   private async loadSale(tx: DbExecutor, orgId: string, saleId: string): Promise<unknown> {
     const sale = await tx.query(
       `SELECT id, branch_id AS "branchId", user_id AS "userId", device_id AS "deviceId",
-              shift_id AS "shiftId", client_operation_id AS "clientOperationId", status,
+              shift_id AS "shiftId", customer_id AS "customerId", client_operation_id AS "clientOperationId", status,
               subtotal, discount, tax_total AS "taxTotal", total, tendered,
               change_due AS "changeDue", business_time AS "businessTime", notes,
               completed_at AS "completedAt"

@@ -39,6 +39,10 @@ data class ReceiptData(
     val tenders: List<String>,
     val changeDue: String,
     val timestamp: Long,
+    /** Customer account when the sale was on credit (Phase 5). */
+    val customerName: String? = null,
+    /** eReceipt recipient when the cashier asked for one at the till. */
+    val emailTo: String? = null,
 )
 
 /** One tender line on a sale: server tenderType + decimal-string amount. */
@@ -92,6 +96,12 @@ class PosState(
         private set
     var pendingOps by mutableStateOf(0)
         private set
+    /** Phase 5: customers loaded for credit-sale selection (list picker). */
+    var customers by mutableStateOf<List<JSONObject>>(emptyList())
+        private set
+    /** Phase 5: the account the credit portion of the current cart charges to. */
+    var creditCustomerId by mutableStateOf<String?>(null)
+        private set
 
     val total: BigDecimal
         get() = items.fold(BigDecimal.ZERO) { acc, item -> acc.add(item.lineTotal) }
@@ -135,13 +145,56 @@ class PosState(
         pendingOps = outboxDao.pendingCount()
     }
 
+    /** Loads the customer accounts for the credit-sale picker (online read). */
+    suspend fun loadCustomers() {
+        if (customers.isNotEmpty()) return
+        try {
+            val token = auth.accessToken ?: return
+            val res = api.get("/customers", token)
+            val arr = res.optJSONArray("customers")
+            customers = (0 until (arr?.length() ?: 0)).map { arr!!.getJSONObject(it) }
+        } catch (_: Exception) {
+            // The till keeps selling cash/card; the picker just stays empty.
+        }
+    }
+
+    fun selectCreditCustomer(id: String?) {
+        creditCustomerId = id
+    }
+
+    /**
+     * Phase 5: emails a receipt for an ALREADY-COMPLETED sale (found by its
+     * client operation id). Online-first — used from the receipt screen to
+     * send a receipt the cashier forgot to queue. Returns an error string,
+     * or null on success.
+     */
+    suspend fun emailReceipt(clientOperationId: String, to: String): String? {
+        val trimmed = to.trim()
+        if (trimmed.isEmpty()) return "Enter an email address"
+        busy = true
+        error = null
+        try {
+            val token = auth.accessToken ?: throw IllegalStateException("Not logged in")
+            api.post(
+                "/receipts/email",
+                JSONObject().put("clientOperationId", clientOperationId).put("to", trimmed),
+                token,
+            )
+            return null
+        } catch (e: Exception) {
+            return e.message ?: "Could not email the receipt"
+        } finally {
+            busy = false
+        }
+    }
+
     /**
      * Completes the sale into the LOCAL outbox (works with zero network).
      * Tenders are (tenderType, decimal-string amount) pairs — cash, card,
      * mobile money etc. — and the change due is only what the tender sum
      * exceeds the total by. Tenders and totals stay decimal strings end to end.
      */
-    suspend fun completeSale(tendersInput: List<TenderEntry>) {
+    suspend fun completeSale(tendersInput: List<TenderEntry>, customerId: String? = null, emailTo: String? = null) {
         if (items.isEmpty()) {
             error = "Cart is empty"
             return
@@ -155,6 +208,11 @@ class PosState(
             error = "Enter at least one tender amount"
             return
         }
+        val hasCredit = tenders.any { it.type == "credit" }
+        if (hasCredit && customerId.isNullOrBlank()) {
+            error = "Select a customer account for the credit portion"
+            return
+        }
         val totalTendered = tenders.fold(BigDecimal.ZERO) { acc, t -> acc.add(BigDecimal(t.amount)) }
         if (totalTendered < total) {
             error = "Tendered is less than the total"
@@ -165,6 +223,7 @@ class PosState(
             error = "No branch selected"
             return
         }
+        val receiptEmail = emailTo?.trim().orEmpty().ifEmpty { null }
 
         val clientOperationId = UUID.randomUUID().toString()
         val lines = JSONArray()
@@ -183,8 +242,12 @@ class PosState(
             .put("branchId", branchId)
             .put("lines", lines)
             .put("tenders", tendersJson)
+        if (customerId != null && hasCredit) payload.put("customerId", customerId)
         shift?.let { payload.put("shiftId", it.id) }
 
+        // Sale first, then (optional) eReceipt op — the outbox flushes in
+        // createdAt order, so the email is dispatched AFTER the sale exists
+        // server-side (receipt.email is found by the sale's client op id).
         outboxDao.insert(
             OutboxOperationEntity(
                 clientOperationId = clientOperationId,
@@ -193,7 +256,21 @@ class PosState(
                 idempotencyKey = clientOperationId,
             ),
         )
+        if (receiptEmail != null) {
+            outboxDao.insert(
+                OutboxOperationEntity(
+                    clientOperationId = "email:" + clientOperationId,
+                    opType = "receipt.email",
+                    payloadJson = JSONObject()
+                        .put("clientOperationId", clientOperationId)
+                        .put("to", receiptEmail)
+                        .toString(),
+                    idempotencyKey = "email:" + clientOperationId,
+                ),
+            )
+        }
 
+        val customer = customers.firstOrNull { it.optString("id") == customerId }
         receipt = ReceiptData(
             clientOperationId = clientOperationId,
             lines = items.map { "${it.name} × ${it.quantity.toPlainString()}" },
@@ -201,8 +278,11 @@ class PosState(
             tenders = tenders.map { "${TENDER_LABELS[it.type] ?: it.type}  ${formatMoney(BigDecimal(it.amount))}" },
             changeDue = formatMoney(totalTendered.subtract(total)),
             timestamp = System.currentTimeMillis(),
+            customerName = customer?.optString("name"),
+            emailTo = receiptEmail,
         )
         items = emptyList()
+        creditCustomerId = null
         error = null
     }
 

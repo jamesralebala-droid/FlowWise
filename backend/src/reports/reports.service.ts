@@ -135,4 +135,117 @@ export class ReportsService {
       },
     );
   }
+
+  /**
+   * Phase 5: stock valuation per branch — quantity on hand × latest landed
+   * unit cost (from the ledger; receipts carry the true landed cost).
+   */
+  async stockValuation(claims: JwtPayloadClaims, f: ReportFilters): Promise<unknown> {
+    return this.db.withContext(
+      { orgId: claims.org, userId: claims.sub, deviceId: claims.dev },
+      async (tx) => {
+        if (f.branchId) {
+          const b = await tx.query("SELECT id FROM branches WHERE id = $1 AND org_id = $2", [f.branchId, claims.org]);
+          if (b.rows.length === 0) throw new BadRequestException("Unknown branch");
+        }
+        const params: unknown[] = [claims.org];
+        const clauses = ["ii.org_id = $1", "ii.quantity_on_hand <> 0"];
+        if (f.branchId) {
+          params.push(f.branchId);
+          clauses.push(`ii.branch_id = $${params.length}`);
+        }
+        const r = await tx.query(
+          `SELECT ii.branch_id AS "branchId", b.name AS "branchName",
+                  count(*)::int AS variants,
+                  COALESCE(SUM(ii.quantity_on_hand * c.unit_cost), 0)::numeric(14,4) AS value
+           FROM inventory_items ii
+           JOIN branches b ON b.id = ii.branch_id
+           JOIN LATERAL (
+             SELECT sl.unit_cost FROM stock_ledger sl
+             WHERE sl.variant_id = ii.variant_id AND sl.branch_id = ii.branch_id
+               AND sl.unit_cost IS NOT NULL
+             ORDER BY sl.business_time DESC, sl.id DESC LIMIT 1
+           ) c ON true
+           WHERE ${clauses.join(" AND ")}
+           GROUP BY ii.branch_id, b.name
+           ORDER BY value DESC`,
+          params,
+        );
+        const total = r.rows.reduce((acc, row) => acc + Number(row.value), 0).toFixed(4);
+        return { branchId: f.branchId ?? null, total, rows: r.rows };
+      },
+    );
+  }
+
+  /**
+   * Phase 5: margin per variant over a period. COGS uses the current landed
+   * cost (latest ledger cost per variant+branch) — documented approximation,
+   * exact when costs are stable.
+   */
+  async margin(claims: JwtPayloadClaims, f: ReportFilters): Promise<unknown> {
+    return this.db.withContext(
+      { orgId: claims.org, userId: claims.sub, deviceId: claims.dev },
+      async (tx) => {
+        if (f.branchId) {
+          const b = await tx.query("SELECT id FROM branches WHERE id = $1 AND org_id = $2", [f.branchId, claims.org]);
+          if (b.rows.length === 0) throw new BadRequestException("Unknown branch");
+        }
+        const { where, params } = periodWhere(claims.org, f, "s");
+        const r = await tx.query(
+          `SELECT v.id AS "variantId", p.name AS "productName", v.name AS "variantName",
+                  COALESCE(SUM(sl2.quantity), 0)::numeric(14,4) AS "unitsSold",
+                  COALESCE(SUM(sl2.line_total), 0)::numeric(14,4) AS revenue,
+                  COALESCE(SUM(sl2.quantity * c.unit_cost), 0)::numeric(14,4) AS cogs,
+                  COALESCE(SUM(sl2.line_total) - SUM(sl2.quantity * c.unit_cost), 0)::numeric(14,4) AS margin
+           FROM sale_lines sl2
+           JOIN sales s ON s.id = sl2.sale_id
+           JOIN product_variants v ON v.id = sl2.variant_id
+           JOIN products p ON p.id = v.product_id
+           JOIN LATERAL (
+             SELECT sl.unit_cost FROM stock_ledger sl
+             WHERE sl.variant_id = v.id AND sl.branch_id = s.branch_id
+               AND sl.unit_cost IS NOT NULL
+             ORDER BY sl.business_time DESC, sl.id DESC LIMIT 1
+           ) c ON true
+           WHERE ${where} AND s.status = 'completed'
+           GROUP BY v.id, p.name, v.name
+           ORDER BY margin DESC
+           LIMIT 100`,
+          params,
+        );
+        return { branchId: f.branchId ?? null, rows: r.rows };
+      },
+    );
+  }
+
+  /** Phase 5: top products by revenue over a period (default 10). */
+  async topProducts(claims: JwtPayloadClaims, f: ReportFilters & { limit?: number }): Promise<unknown> {
+    return this.db.withContext(
+      { orgId: claims.org, userId: claims.sub, deviceId: claims.dev },
+      async (tx) => {
+        if (f.branchId) {
+          const b = await tx.query("SELECT id FROM branches WHERE id = $1 AND org_id = $2", [f.branchId, claims.org]);
+          if (b.rows.length === 0) throw new BadRequestException("Unknown branch");
+        }
+        const limit = Math.min(Math.max(f.limit ?? 10, 1), 50);
+        const { where, params } = periodWhere(claims.org, f, "s");
+        params.push(limit);
+        const r = await tx.query(
+          `SELECT v.id AS "variantId", p.name AS "productName", v.name AS "variantName",
+                  COALESCE(SUM(sl2.quantity), 0)::numeric(14,4) AS "unitsSold",
+                  COALESCE(SUM(sl2.line_total), 0)::numeric(14,4) AS revenue
+           FROM sale_lines sl2
+           JOIN sales s ON s.id = sl2.sale_id
+           JOIN product_variants v ON v.id = sl2.variant_id
+           JOIN products p ON p.id = v.product_id
+           WHERE ${where} AND s.status = 'completed'
+           GROUP BY v.id, p.name, v.name
+           ORDER BY revenue DESC
+           LIMIT $${params.length}`,
+          params,
+        );
+        return { branchId: f.branchId ?? null, rows: r.rows };
+      },
+    );
+  }
 }
