@@ -1,0 +1,26 @@
+# deps / build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# env & secrets
+.env
+.env.local
+.env.*.local
+
+# logs / os
+*.log
+.DS_Store
+
+# android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+*.keystore
+*.jks
+
+# ide
+.idea/
+.vscode/
