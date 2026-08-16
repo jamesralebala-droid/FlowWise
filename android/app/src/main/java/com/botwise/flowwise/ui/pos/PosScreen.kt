@@ -1,5 +1,6 @@
 package com.botwise.flowwise.ui.pos
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,12 +15,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,10 +50,13 @@ fun PosScreen(
     val scope = rememberCoroutineScope()
     var showOpenShift by remember { mutableStateOf(false) }
     var showCashUp by remember { mutableStateOf(false) }
+    var showCustomerPicker by remember { mutableStateOf(false) }
     var openingCash by remember { mutableStateOf("0") }
     var cashTender by remember { mutableStateOf("0") }
     var cardTender by remember { mutableStateOf("0") }
     var mobileTender by remember { mutableStateOf("0") }
+    var creditTender by remember { mutableStateOf("0") }
+    var emailTo by remember { mutableStateOf("") }
     var declaredCash by remember { mutableStateOf("0") }
     var declaredCard by remember { mutableStateOf("0") }
     var declaredMobile by remember { mutableStateOf("0") }
@@ -60,10 +66,14 @@ fun PosScreen(
     val cash = cashTender.toBigDecimalOrNull() ?: BigDecimal.ZERO
     val card = cardTender.toBigDecimalOrNull() ?: BigDecimal.ZERO
     val mobile = mobileTender.toBigDecimalOrNull() ?: BigDecimal.ZERO
-    val tendered = cash.add(card).add(mobile)
+    val credit = creditTender.toBigDecimalOrNull() ?: BigDecimal.ZERO
+    val tendered = cash.add(card).add(mobile).add(credit)
     val change = tendered.subtract(state.total)
     val short = change < BigDecimal.ZERO
-    val canComplete = state.items.isNotEmpty() && !state.busy && tendered > BigDecimal.ZERO && !short
+    val creditNeedsCustomer = credit > BigDecimal.ZERO && state.creditCustomerId == null
+    val canComplete = state.items.isNotEmpty() && !state.busy && tendered > BigDecimal.ZERO && !short && !creditNeedsCustomer
+
+    LaunchedEffect(Unit) { state.loadCustomers() }
 
     Column(modifier.fillMaxSize().padding(16.dp)) {
         ShiftBanner(
@@ -129,6 +139,27 @@ fun PosScreen(
         TenderRow("Cash", cashTender, { cashTender = it })
         TenderRow("Card", cardTender, { cardTender = it })
         TenderRow("Mobile money", mobileTender, { mobileTender = it })
+        TenderRow("Credit", creditTender, { creditTender = it })
+        if (credit > BigDecimal.ZERO) {
+            Spacer(Modifier.height(6.dp))
+            CustomerPickerRow(state, onPick = { showCustomerPicker = true })
+            if (creditNeedsCustomer) {
+                Text(
+                    "Select a customer account for the credit sale",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = emailTo,
+            onValueChange = { emailTo = it },
+            label = { Text("Email receipt to (optional)") },
+            singleLine = true,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email),
+            modifier = Modifier.fillMaxWidth(),
+        )
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -152,7 +183,10 @@ fun PosScreen(
                             TenderEntry("cash", cashTender),
                             TenderEntry("card", cardTender),
                             TenderEntry("mobileMoney", mobileTender),
+                            TenderEntry("credit", creditTender),
                         ),
+                        customerId = if (credit > BigDecimal.ZERO) state.creditCustomerId else null,
+                        emailTo = emailTo,
                     )
                     if (state.receipt != null) onSaleCompleted()
                 }
@@ -202,6 +236,45 @@ fun PosScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showOpenShift = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showCustomerPicker) {
+        AlertDialog(
+            onDismissRequest = { showCustomerPicker = false },
+            title = { Text("Credit customer") },
+            text = {
+                if (state.customers.isEmpty()) {
+                    Text(
+                        "No customer accounts synced. Create one in Customers first.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn {
+                        items(state.customers, key = { it.optString("id") }) { customer ->
+                            Column(
+                                Modifier.fillMaxWidth()
+                                    .clickable {
+                                        state.selectCreditCustomer(customer.optString("id"))
+                                        showCustomerPicker = false
+                                    }
+                                    .padding(vertical = 10.dp),
+                            ) {
+                                Text(customer.optString("name"), style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    "Balance ${formatMoney(BigDecimal(customer.optString("balance", "0")))} · limit ${formatMoney(BigDecimal(customer.optString("creditLimit", "0")))} · ${customer.optString("phone", customer.optString("email", ""))}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCustomerPicker = false }) { Text("Cancel") }
             },
         )
     }
@@ -368,5 +441,35 @@ private fun TenderRow(label: String, value: String, onValueChange: (String) -> U
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+    }
+}
+
+/** Row that shows the selected credit customer (or prompts to pick one). */
+@Composable
+private fun CustomerPickerRow(state: PosState, onPick: () -> Unit) {
+    val selected = state.customers.firstOrNull { it.optString("id") == state.creditCustomerId }
+    Card(
+        Modifier.fillMaxWidth().clickable(onClick = onPick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (selected != null) selected.optString("name") else "Select credit customer…",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (selected != null) {
+                    Text(
+                        "Balance ${formatMoney(BigDecimal(selected.optString("balance", "0")))} — tap to change",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text("▾", style = MaterialTheme.typography.titleMedium)
+        }
     }
 }

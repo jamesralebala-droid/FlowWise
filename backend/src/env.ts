@@ -14,6 +14,10 @@ export interface Env {
   /** Brute-force protection on /v1/oauth/authorize (Phase 4 hardening). */
   authMaxFailedAttempts: number;
   authAttemptWindowSeconds: number;
+  /** Resend API key for eReceipts (Phase 5). Absent → emails are 'skipped'. */
+  resendApiKey?: string;
+  /** From-address for receipt emails (must be a verified sender on Resend). */
+  receiptEmailFrom: string;
 }
 
 export function loadEnv(): Env {
@@ -36,6 +40,8 @@ export function loadEnv(): Env {
     oauthClientId: process.env.OAUTH_CLIENT_ID ?? "flowwise-app",
     authMaxFailedAttempts: Number(process.env.AUTH_MAX_FAILED_ATTEMPTS ?? 5),
     authAttemptWindowSeconds: Number(process.env.AUTH_ATTEMPT_WINDOW_SECONDS ?? 900),
+    resendApiKey: process.env.RESEND_API_KEY || undefined,
+    receiptEmailFrom: process.env.RECEIPT_EMAIL_FROM ?? "FlowWise Receipts <onboarding@resend.dev>",
   };
 }
 

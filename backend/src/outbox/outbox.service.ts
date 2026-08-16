@@ -8,11 +8,13 @@ import { GrnsService, type CreateGrnInput } from "../inventory/grns.service.js";
 import { TransfersService, type CreateTransferInput } from "../inventory/transfers.service.js";
 import { AdjustmentsService, type CreateAdjustmentInput } from "../inventory/adjustments.service.js";
 import { CountsService } from "../inventory/counts.service.js";
+import { CustomersService, type SettleInput } from "../customers/customers.service.js";
+import { ReceiptsService, type ReceiptEmailInput } from "../receipts/receipts.service.js";
 
 export interface OutboxOperation {
   /** client-generated id echoed back so the device can match results */
   id: string;
-  type: "sale" | "refund" | "grn" | "transfer" | "adjustment" | "count.post";
+  type: "sale" | "refund" | "grn" | "transfer" | "adjustment" | "count.post" | "customer.settle" | "receipt.email";
   clientOperationId: string;
   payload: Record<string, unknown>;
 }
@@ -45,6 +47,8 @@ export class OutboxService {
     private readonly transfers: TransfersService,
     private readonly adjustments: AdjustmentsService,
     private readonly counts: CountsService,
+    private readonly customers: CustomersService,
+    private readonly receipts: ReceiptsService,
   ) {}
 
   async push(claims: JwtPayloadClaims, input: OutboxPushInput): Promise<{ results: OutboxOpResult[] }> {
@@ -131,6 +135,29 @@ export class OutboxService {
             continue;
           }
           const body = await this.counts.post(claims, countId);
+          results.push({ id: op.id, status: "ok", httpStatus: 201, body });
+        } else if (op.type === "customer.settle") {
+          // Offline payment against a customer account (Phase 5).
+          if (!claims.perms.includes("customer.settle")) {
+            results.push({ id: op.id, status: "error", httpStatus: 403, error: "missing permission customer.settle" });
+            continue;
+          }
+          const body = await this.customers.settle(claims, {
+            ...(op.payload as unknown as SettleInput),
+            clientOperationId,
+          });
+          results.push({ id: op.id, status: "ok", httpStatus: 201, body });
+        } else if (op.type === "receipt.email") {
+          // eReceipt: found by the SALE's client op id (same batch, queued
+          // after the sale in createdAt order). Replay-safe per recipient.
+          if (!claims.perms.includes("pos.sell")) {
+            results.push({ id: op.id, status: "error", httpStatus: 403, error: "missing permission pos.sell" });
+            continue;
+          }
+          const body = await this.receipts.sendReceipt(claims, {
+            ...(op.payload as unknown as ReceiptEmailInput),
+            clientOperationId,
+          });
           results.push({ id: op.id, status: "ok", httpStatus: 201, body });
         } else {
           results.push({ id: op.id, status: "error", httpStatus: 400, error: `unsupported operation type: ${String(op.type)}` });

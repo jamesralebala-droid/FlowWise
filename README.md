@@ -9,13 +9,16 @@ everything reconciles exactly, replay-safe, against a single source of truth.
 
 > **Status: Phase 0 (Foundation) ✅ + Phase 1 (POS core) ✅ + Phase 2
 > (Inventory ops) ✅ + Phase 3 (Procurement & intelligence) ✅ + Phase 4
-> (Hardening & rollout) ✅ — implemented & test-verified in this repo.**
+> (Hardening & rollout) ✅ + Phase 5 (Customers, credit, reports & eReceipts)
+> ✅ — implemented & test-verified in this repo.**
 > Backend: NestJS + PostgreSQL 15+ (migrations, RLS, OAuth2 PKCE, ledger
 > invariants, sales/shifts/outbox/reports, GRN/batches/FEFO/counts/transfers/
 > adjustments, reorder rules/suggestions, purchase orders with partial
 > receipts, supplier scorecard, webhooks; Phase 4: login throttling, audit
-> API, CSV data import, load test, backup/restore runbook). Android:
-> source-only skeleton (needs Android Studio to build).
+> API, CSV data import, load test, backup/restore runbook; Phase 5:
+> customer accounts + credit sales + settlements (append-only ledger),
+> stock-valuation/margin/top-products reports, and eReceipts via Resend.
+> Android: source-only (builds in CI via `gradle :app:assembleDebug`).
 
 ## The five invariants (non-negotiable)
 
@@ -36,16 +39,19 @@ backend/          NestJS + TypeScript API (REST /v1)
   migrations/     001 tenancy/RBAC/OAuth/RLS · 002 catalogue · 003 ledger
                  · 004 sales · 005 shifts/cash-up · 006 inventory ops
                  · 007 procurement · 008 hardening (throttle, data import)
+                 · 009 customers/credit/eReceipts
   src/            db layer, OAuth2 PKCE, guards, catalogue, idempotency,
                   sales, shifts, outbox, reports, audit, import, inventory
                   (suppliers, GRNs, transfers, counts, adjustments, stock
                   views), procurement (reorder rules/evaluator, POs,
-                  webhooks, scorecard)
+                  webhooks, scorecard), customers (accounts, ledger,
+                  settlements), receipts (eReceipt email via Resend)
   test/           PGlite-backed integration tests (RLS, ledger, OAuth,
                   catalogue, sales, shifts, outbox, reports, inventory,
-                  FEFO, procurement, import, throttling)
+                  FEFO, procurement, import, throttling, customers,
+                  receipts, Phase-5 reports)
   scripts/        test.sh · loadtest.ts · backup.sh · restore.sh
-android/          Kotlin + Jetpack Compose app skeleton (Room/SQLCipher, WorkManager, ML Kit)
+android/          Kotlin + Jetpack Compose app (Room/SQLCipher, WorkManager, ML Kit)
 docs/OPS.md       Operations runbook: deploy, backup/restore, monitoring,
                   incident response, pilot + training checklists
 ```
@@ -100,6 +106,8 @@ a no-op (verified by `test/seed.test.ts`). The Android app uses OAuth client
 | `OAUTH_CLIENT_ID` | `flowwise-app` | Public client used by the app |
 | `AUTH_MAX_FAILED_ATTEMPTS` | `5` | Failed logins per account+IP before 429 (Phase 4) |
 | `AUTH_ATTEMPT_WINDOW_SECONDS` | `900` | Throttle sliding window; failures age out |
+| `RESEND_API_KEY` | *(unset)* | eReceipts: Resend API key. Without it, email ops record `skipped` and sales never break |
+| `RECEIPT_EMAIL_FROM` | `FlowWise <onboarding@resend.dev>` | eReceipt sender address (verify your domain in Resend) |
 
 **Production setup notes:** run migrations and seeds as a BYPASSRLS migrator
 role; run the API as a role granted table DML on the `public` schema (RLS
@@ -212,6 +220,40 @@ tender-type allocation is a Phase 2 refinement (refunds currently net against
 | `bun run import:catalogue` | — | Legacy CSV import (catalogue + opening stock) — idempotent, one-transaction, ledger-backed |
 | `backend/scripts/backup.sh` / `restore.sh` | — | `pg_dump`/`pg_restore` runbook (see `docs/OPS.md` §2) |
 
+### Phase 5 (customers, credit, reports & eReceipts — verified by `bun run test`)
+
+| Endpoint | Permission | Purpose |
+| --- | --- | --- |
+| `GET /v1/customers[?q]` · `POST /v1/customers` | `customer.read` / `customer.write` | List (balances derived from the ledger) / create account (`creditLimit` "0" = no credit) |
+| `GET /v1/customers/:id` · `PUT /:id` | `customer.read` / `customer.write` | Detail / edit (email unique per org) |
+| `GET /v1/customers/:id/statement[?from&to]` | `customer.read` | Every ledger entry with branch name, newest first |
+| `POST /v1/customers/:id/settlements` | `customer.settle` | Record a payment — ledger entry, replay-safe on `client_operation_id` (outbox `customer.settle` op) |
+| `POST /v1/sales` (with `customerId` + `credit` tender) | `pos.sell` | Credit sale: receivable created **in the same transaction** as the sale (Invariant 3); limit + balance checked |
+| `POST /v1/receipts/email` | `pos.sell` | eReceipt by the sale's `clientOperationId` (outbox `receipt.email` op) |
+| `GET /v1/reports/stock-valuation` | `reports.read` | On-hand × latest landed cost per branch |
+| `GET /v1/reports/margin` | `reports.read` | Revenue vs COGS per variant (current-cost approximation) |
+| `GET /v1/reports/top-products[?limit]` | `reports.read` | Top products by revenue over the period |
+
+**Phase 5 notes:**
+
+- **The receivable is a ledger, not a column.** `customer_ledger` is
+  append-only (sale +, settlement/refund −); the balance is the derived
+  `v_customer_balances` view, same discipline as stock. A credit sale and its
+  receivable row commit in one transaction; a refund of a credit sale
+  reduces the receivable in the refund's transaction.
+- **Credit limits are enforced at sale time** — a customer with
+  `credit_limit = 0` is a cash/card-only account, and over-limit sales are
+  rejected before any ledger write.
+- **Two-step approval on settlements.** Cashiers can create customers at the
+  till (`customer.write`) but only managers/owners record payments
+  (`customer.settle`) — and settlements queue through the outbox like every
+  other offline write.
+- **eReceipts are replay-safe and never block the till.** One email per
+  (sale, recipient), persisted in `receipt_emails`; a retried flush returns
+  the stored attempt. Without a `RESEND_API_KEY` the attempt is recorded as
+  `skipped` and the sale still completes — offline-first means nothing
+  breaks because email is down.
+
 **Phase 4 notes:**
 
 - **Login throttling.** `POST /v1/oauth/authorize` locks an account+IP after
@@ -239,12 +281,18 @@ ML Kit + CameraX barcode scanning. Open in Android Studio and run
 `./gradlew :app:assembleDebug`; set the API base URL via
 `buildConfigField` (default `http://10.0.2.2:4000/v1` for the emulator).
 
-Screens: Login → Branch select → Home (Till / Stock / Procurement / Sync
-queue). The till takes cash, card and mobile-money tenders with quick
-amounts and live change; sales, GRNs, transfers and adjustments are saved to
-the local outbox first and pushed via `POST /v1/outbox` by a WorkManager
-worker (auto) or the Sync queue screen (manual "Sync now") — same shared
-flush path, replay-safe via `client_operation_id`.
+Screens: Login → Branch select → Home (Till / Stock / Procurement /
+Customers / Reports / Sync queue). The till takes cash, card, mobile-money
+**and credit** tenders with quick amounts and live change — a credit tender
+requires picking a customer account (balance shown inline) — and can queue
+an **eReceipt** by entering the customer's email before completing. Sales,
+GRNs, transfers, adjustments, **settlements** and **receipt emails** are
+saved to the local outbox first and pushed via `POST /v1/outbox` by a
+WorkManager worker (auto) or the Sync queue screen (manual "Sync now") —
+same shared flush path, replay-safe via `client_operation_id`. Customers
+gives account balances, creation, statements and offline-queued payments;
+Reports shows the sales summary + tender mix, stock valuation and top
+products for Today / 7 days / 30 days.
 
 ## Roadmap
 
@@ -255,6 +303,7 @@ flush path, replay-safe via `client_operation_id`.
 | 2 | GRN, batches/FEFO, counts, adjustments, transfers | ✅ backend + tests — Android UI next |
 | 3 | Reorder rules, forecasting, suggestions→POs, partial receipts, scorecard, webhooks | ✅ backend + tests — Android UI next |
 | 4 | Load/security/restore/device testing, data import, training, pilot | ✅ backend hardening + runbook (`docs/OPS.md`) — pilot checklists ready |
+| 5 | Customer accounts & credit sales, reports & analytics, eReceipts, Android build in CI | ✅ backend + Android + CI (`gradle :app:assembleDebug`) |
 
 `stock_ledger` → `apply_stock_ledger()` → `inventory_items` (with
 `v_stock_reconciliation`) is already live in migration 003, so Phase 1 builds

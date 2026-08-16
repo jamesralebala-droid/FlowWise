@@ -112,6 +112,26 @@ describe("seed:dev demo data (multi-branch pilot fixture)", () => {
     expect(maize[0].qoh).toBe("18.0000");
   });
 
+  it("creates phase 5 demo customers with a receivable and credit limit", async () => {
+    expect(firstRun.customers).toBe(2);
+    expect(firstRun.customerOpeningRows).toBe(1);
+
+    const customers = await q(
+      `SELECT c.email, c.credit_limit::text AS "creditLimit", COALESCE(b.balance, 0)::numeric(14,4)::text AS balance
+       FROM customers c
+       LEFT JOIN v_customer_balances b ON b.customer_id = c.id AND b.org_id = c.org_id
+       WHERE c.org_id = $1 ORDER BY c.name`,
+      [orgId],
+    );
+    expect(customers).toHaveLength(2);
+    const lodge = customers.find((c) => c.email === "accounts@maunlodge.test");
+    expect(lodge?.creditLimit).toBe("5000.0000");
+    expect(lodge?.balance).toBe("850.0000");
+    const walkIn = customers.find((c) => c.email === "kelebogile@example.test");
+    expect(walkIn?.creditLimit).toBe("0.0000");
+    expect(walkIn?.balance).toBe("0.0000");
+  });
+
   it("creates per-branch reorder rules and demo users with correct scopes", async () => {
     expect(firstRun.reorderRules).toBe(32);
 
@@ -156,10 +176,12 @@ describe("seed:dev demo data (multi-branch pilot fixture)", () => {
     const passwordHash = await hashPassword("Password123!");
     const rerun = await seedDemoData(exec, passwordHash);
 
-    // No new catalogue, no new ledger movements, no new rules.
+    // No new catalogue, no new ledger movements, no new rules, no new customers.
     expect(rerun.products).toBe(16);
     expect(rerun.openingLedgerRows).toBe(0);
     expect(rerun.reorderRules).toBe(32);
+    expect(rerun.customers).toBe(2);
+    expect(rerun.customerOpeningRows).toBe(0);
 
     const counts = await q(
       `SELECT

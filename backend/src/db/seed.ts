@@ -33,6 +33,8 @@ export interface DemoSeedResult {
   openingLedgerRows: number;
   reorderRules: number;
   users: number;
+  customers: number;
+  customerOpeningRows: number;
 }
 
 interface BranchStock {
@@ -132,6 +134,25 @@ const USERS: SeedUser[] = [
   { email: "auditor@flowwise.demo", name: "Demo Auditor", assignments: [{ role: "auditor", branch: null }] },
 ];
 
+// Phase 5 demo customers: one account with a credit limit and a receivable
+// (so statements and settlements are demo-able), one cash-only walk-in.
+const CUSTOMERS = [
+  {
+    email: "accounts@maunlodge.test",
+    name: "Maun Lodge Supplies",
+    phone: "+267 76 123 456",
+    creditLimit: "5000",
+    openingBalance: "850",
+  },
+  {
+    email: "kelebogile@example.test",
+    name: "Mma Kelebogile",
+    phone: "+267 71 654 321",
+    creditLimit: "0",
+    openingBalance: null,
+  },
+];
+
 async function insertReturningId(exec: SqlExecutor, sql: string, params: unknown[]): Promise<string | null> {
   const r = await exec.query(sql, params);
   return (r.rows[0]?.id as string) ?? null;
@@ -219,6 +240,8 @@ export async function seedDemoData(exec: SqlExecutor, passwordHash: string): Pro
     openingLedgerRows: 0,
     reorderRules: 0,
     users: 0,
+    customers: 0,
+    customerOpeningRows: 0,
   };
 
   // ---- catalogue + opening stock + reorder rules ---------------------------
@@ -367,6 +390,43 @@ export async function seedDemoData(exec: SqlExecutor, passwordHash: string): Pro
      VALUES ('flowwise-app', 'FlowWise Android', '[]'::jsonb)
      ON CONFLICT (client_id) DO NOTHING`,
   );
+
+  // ---- Phase 5 demo customers + opening receivables --------------------------
+  const ownerRow = await exec.query(
+    `SELECT id FROM users WHERE org_id = $1 AND email = 'owner@flowwise.demo' LIMIT 1`,
+    [orgId],
+  );
+  const ownerUserId = (ownerRow.rows[0]?.id as string) ?? null;
+
+  for (const c of CUSTOMERS) {
+    const customerId =
+      (await insertReturningId(exec, `SELECT id FROM customers WHERE org_id = $1 AND lower(trim(email)) = $2`, [orgId, c.email])) ??
+      (await insertReturningId(
+        exec,
+        `INSERT INTO customers (org_id, name, phone, email, credit_limit)
+         VALUES ($1, $2, $3, $4, $5::numeric(14,4))
+         RETURNING id`,
+        [orgId, c.name, c.phone, c.email, c.creditLimit],
+      ))!;
+    result.customers += 1;
+
+    if (c.openingBalance) {
+      // Opening receivable enters the append-only customer ledger exactly once
+      // (idempotency key); the balance view derives from it like everywhere.
+      const inserted = await exec.query(
+        `INSERT INTO customer_ledger
+           (org_id, customer_id, branch_id, entry_type, amount, reference_type, notes,
+            client_operation_id, business_time, created_by_user_id)
+         VALUES ($1, $2, $3, 'adjustment', $4::numeric(14,4), 'seed', 'Seed opening balance',
+                 $5, now(), $6)
+         ON CONFLICT (org_id, customer_id, client_operation_id)
+         WHERE client_operation_id IS NOT NULL DO NOTHING
+         RETURNING id`,
+        [orgId, customerId, branchIdByCode["MAIN"], c.openingBalance, `seed:customer:opening:${c.email}`, ownerUserId],
+      );
+      result.customerOpeningRows += inserted.rows.length;
+    }
+  }
 
   return result;
 }
